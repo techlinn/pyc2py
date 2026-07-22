@@ -1,16 +1,20 @@
 import ast
 from collections.abc import Callable
 from dataclasses import dataclass
+
 from pyc2py.astree import safe_identifier
 from pyc2py.bytecode.instruction import Instruction
 from pyc2py.bytecode.opcode_table import normalized_opcode_name
+
 
 @dataclass(frozen=True, slots=True)
 class StatementBlock:
     body: tuple[ast.stmt, ...]
 
+
 def make_block(statements: list[ast.stmt]) -> StatementBlock:
     return StatementBlock(body=tuple(statements))
+
 
 def is_forward_conditional_jump(instruction: Instruction) -> bool:
     opname = normalized_opcode_name(instruction.opname)
@@ -22,13 +26,16 @@ def is_forward_conditional_jump(instruction: Instruction) -> bool:
         isinstance(instruction.argval, int) and instruction.argval > instruction.offset
     )
 
+
 def is_false_jump(opname: str) -> bool:
     opname = normalized_opcode_name(opname)
     return "IF_FALSE" in opname or "IF_NOT_NONE" in opname
 
+
 def is_none_jump(opname: str) -> bool:
     opname = normalized_opcode_name(opname)
     return "IF_NONE" in opname or "IF_NOT_NONE" in opname
+
 
 def is_conditional_jump_name(opname: str) -> bool:
     opname = normalized_opcode_name(opname)
@@ -38,6 +45,7 @@ def is_conditional_jump_name(opname: str) -> bool:
         or "IF_NONE" in opname
         or "IF_NOT_NONE" in opname
     )
+
 
 def invert_condition(condition: ast.expr) -> ast.expr:
     if isinstance(condition, ast.UnaryOp) and isinstance(condition.op, ast.Not):
@@ -65,6 +73,7 @@ def invert_condition(condition: ast.expr) -> ast.expr:
             )
     return ast.UnaryOp(op=ast.Not(), operand=condition)
 
+
 def condition_from_jump(opname: str, value: ast.expr) -> ast.expr:
     value = unwrap_truth_test(value)
     if is_none_jump(opname):
@@ -74,6 +83,7 @@ def condition_from_jump(opname: str, value: ast.expr) -> ast.expr:
             comparators=[ast.Constant(value=None)],
         )
     return value
+
 
 def unwrap_truth_test(value: ast.expr) -> ast.expr:
     if not bool(getattr(value, "_pyc2py_truth_test", False)):
@@ -86,18 +96,22 @@ def unwrap_truth_test(value: ast.expr) -> ast.expr:
         return value
     return value.args[0]
 
+
 @dataclass(frozen=True, slots=True)
 class ForLoopPattern:
     for_iter_index: int
     body_end_index: int
     after_index: int
 
+
 @dataclass(frozen=True, slots=True)
 class LegacyForLoopPattern:
     body_end_index: int
     after_index: int
 
+
 LOOP_PREFIX_OPS = {"CACHE", "EXTENDED_ARG", "SET_LINENO", "NOP"}
+
 
 def find_for_loop_pattern(
     instructions: list[Instruction],
@@ -122,12 +136,15 @@ def find_for_loop_pattern(
         search_end_index,
     )
     if back_jump_index is None:
-        if find_loop_back_jump(
-            instructions,
-            loop_entry_offsets(instructions, get_iter_index, for_iter_index),
-            search_end_index,
-            end_index,
-        ) is None:
+        if (
+            find_loop_back_jump(
+                instructions,
+                loop_entry_offsets(instructions, get_iter_index, for_iter_index),
+                search_end_index,
+                end_index,
+            )
+            is None
+        ):
             return None
 
         return ForLoopPattern(
@@ -146,6 +163,7 @@ def find_for_loop_pattern(
         ),
         after_index=skip_loop_cleanup(instructions, exit_index, end_index),
     )
+
 
 def find_legacy_for_loop_pattern(
     instructions: list[Instruction],
@@ -171,6 +189,7 @@ def find_legacy_for_loop_pattern(
         after_index=skip_loop_cleanup(instructions, body_end_index + 1, end_index),
     )
 
+
 def find_for_iter_index(
     instructions: list[Instruction],
     start_index: int,
@@ -186,6 +205,7 @@ def find_for_iter_index(
         cursor += 1
     return None
 
+
 def loop_entry_offsets(
     instructions: list[Instruction],
     get_iter_index: int,
@@ -195,6 +215,7 @@ def loop_entry_offsets(
         instruction.offset
         for instruction in instructions[get_iter_index + 1 : for_iter_index + 1]
     }
+
 
 def find_loop_back_jump(
     instructions: list[Instruction],
@@ -209,6 +230,7 @@ def find_loop_back_jump(
         if instruction.argval in loop_offsets:
             return index
     return None
+
 
 def for_loop_body_end_index(
     instructions: list[Instruction],
@@ -228,6 +250,7 @@ def for_loop_body_end_index(
         return tail_index
     return exit_index
 
+
 def skip_loop_cleanup(
     instructions: list[Instruction],
     exit_index: int,
@@ -238,6 +261,7 @@ def skip_loop_cleanup(
     if instructions[exit_index].opname in {"POP_BLOCK", "END_FOR"}:
         return exit_index + 1
     return exit_index
+
 
 def make_async_with_statement(
     context_expr: ast.expr,
@@ -250,14 +274,17 @@ def make_async_with_statement(
         type_comment=None,
     )
 
+
 def is_yield_expression(value: ast.expr) -> bool:
     return isinstance(value, (ast.Yield, ast.YieldFrom, ast.Await))
+
 
 @dataclass(frozen=True, slots=True)
 class MatchCaseSpec:
     pattern: ast.pattern
     body: tuple[ast.stmt, ...]
     guard: ast.expr | None = None
+
 
 @dataclass(frozen=True, slots=True)
 class SimpleMatchCaseRegion:
@@ -268,6 +295,7 @@ class SimpleMatchCaseRegion:
     guard_start_index: int | None = None
     guard_end_index: int | None = None
 
+
 @dataclass(frozen=True, slots=True)
 class SimpleMatchTest:
     pattern: ast.pattern
@@ -276,10 +304,12 @@ class SimpleMatchTest:
     body_start_index: int | None = None
     body_end_index: int | None = None
 
+
 @dataclass(frozen=True, slots=True)
 class MatchJumpTarget:
     jump_index: int
     miss_index: int
+
 
 @dataclass(frozen=True, slots=True)
 class SequenceMatchHeader:
@@ -291,11 +321,13 @@ class SequenceMatchHeader:
     length_jump_index: int
     count_value: int
 
+
 @dataclass(frozen=True, slots=True)
 class MappingMatchHeader:
     match_jump_index: int
     miss_index: int
     keys_index: int
+
 
 @dataclass(frozen=True, slots=True)
 class MappingKeysShape:
@@ -304,11 +336,13 @@ class MappingKeysShape:
     inner_miss_index: int
     unpack_index: int
 
+
 @dataclass(frozen=True, slots=True)
 class MappingCaptureShape:
     patterns: list[ast.pattern]
     rest_name: str | None
     body_start_index: int
+
 
 @dataclass(frozen=True, slots=True)
 class ClassMatchShape:
@@ -320,12 +354,15 @@ class ClassMatchShape:
     miss_index: int
     unpack_index: int
 
+
 @dataclass(frozen=True, slots=True)
 class SimpleMatchRegion:
     cases: tuple[SimpleMatchCaseRegion, ...]
     after_index: int
 
+
 MATCH_PREFIX_OPS = {"CACHE", "EXTENDED_ARG", "NOP"}
+
 
 def make_match_case(spec: MatchCaseSpec) -> ast.match_case:
     return ast.match_case(
@@ -334,11 +371,13 @@ def make_match_case(spec: MatchCaseSpec) -> ast.match_case:
         body=list(spec.body) or [ast.Pass()],
     )
 
+
 def make_match(subject: ast.expr, cases: list[MatchCaseSpec]) -> ast.Match:
     return ast.Match(
         subject=subject,
         cases=[make_match_case(case) for case in cases],
     )
+
 
 def find_simple_match_region(
     instructions: list[Instruction],
@@ -379,6 +418,7 @@ def find_simple_match_region(
             return None
     return None
 
+
 def read_match_case_cursor(
     instructions: list[Instruction],
     cursor: int,
@@ -398,6 +438,7 @@ def read_match_case_cursor(
         return cursor + 1, True
     return cursor, False
 
+
 def read_simple_match_default_region(
     instructions: list[Instruction],
     cases: list[SimpleMatchCaseRegion],
@@ -416,6 +457,7 @@ def read_simple_match_default_region(
         cases=tuple(collapse_simple_or_cases(instructions, cases)),
         after_index=default_region.body_end_index,
     )
+
 
 def make_simple_match_case_region(
     instructions: list[Instruction],
@@ -474,10 +516,12 @@ def make_simple_match_case_region(
         guard_end_index=guard_end_index,
     )
 
+
 @dataclass(frozen=True, slots=True)
 class MatchAlias:
     name: str
     next_index: int
+
 
 MATCH_ALIAS_STORE_OPS = {
     "STORE_DEREF",
@@ -485,6 +529,7 @@ MATCH_ALIAS_STORE_OPS = {
     "STORE_GLOBAL",
     "STORE_NAME",
 }
+
 
 def read_match_alias(
     instructions: list[Instruction],
@@ -504,6 +549,7 @@ def read_match_alias(
         return None
     return MatchAlias(name=name, next_index=cursor + 1)
 
+
 def find_match_guard_jump(
     instructions: list[Instruction],
     offset_to_index: dict[int, int],
@@ -521,6 +567,7 @@ def find_match_guard_jump(
             return None
         return index
     return None
+
 
 def collapse_simple_or_cases(
     instructions: list[Instruction],
@@ -559,6 +606,7 @@ def collapse_simple_or_cases(
         cursor = next_cursor
     return collapsed
 
+
 def same_match_body(
     instructions: list[Instruction],
     left: SimpleMatchCaseRegion,
@@ -577,6 +625,7 @@ def same_match_body(
         if left_instruction.argrepr != right_instruction.argrepr:
             return False
     return True
+
 
 def read_simple_match_test(
     instructions: list[Instruction],
@@ -601,6 +650,7 @@ def read_simple_match_test(
 
     return read_literal_match_test(instructions, offset_to_index, cursor, end_index)
 
+
 def read_structural_match_test(
     instructions: list[Instruction],
     offset_to_index: dict[int, int],
@@ -618,6 +668,7 @@ def read_structural_match_test(
             return parsed
     return None
 
+
 def read_none_match_test(
     instruction: Instruction,
     offset_to_index: dict[int, int],
@@ -633,6 +684,7 @@ def read_none_match_test(
         jump_index=cursor,
         miss_index=miss_index,
     )
+
 
 def read_literal_match_test(
     instructions: list[Instruction],
@@ -663,6 +715,7 @@ def read_literal_match_test(
         jump_target,
     )
 
+
 def make_literal_match_test(
     instruction: Instruction,
     compare: Instruction,
@@ -687,6 +740,7 @@ def make_literal_match_test(
         )
     return None
 
+
 def read_match_jump_target(
     instructions: list[Instruction],
     offset_to_index: dict[int, int],
@@ -702,6 +756,7 @@ def read_match_jump_target(
     if miss_index is None:
         return None
     return MatchJumpTarget(jump_index=jump_index, miss_index=miss_index)
+
 
 def read_sequence_match_test(
     instructions: list[Instruction],
@@ -761,6 +816,7 @@ def read_sequence_match_test(
         )
     return None
 
+
 def read_sequence_match_header(
     instructions: list[Instruction],
     offset_to_index: dict[int, int],
@@ -802,6 +858,7 @@ def read_sequence_match_header(
         count_value=count_value,
     )
 
+
 def read_sequence_length_test_indexes(
     instructions: list[Instruction],
     start_index: int,
@@ -819,6 +876,7 @@ def read_sequence_length_test_indexes(
     ):
         return None
     return get_len_index, load_count_index, compare_index, length_jump_index
+
 
 def read_fixed_sequence_match_test(
     instructions: list[Instruction],
@@ -845,6 +903,7 @@ def read_fixed_sequence_match_test(
         miss_index=miss_index,
         body_start_index=body_start_index,
     )
+
 
 def read_starred_sequence_match_test(
     instructions: list[Instruction],
@@ -880,10 +939,12 @@ def read_starred_sequence_match_test(
         body_start_index=body_start_index,
     )
 
+
 def unpack_ex_counts(arg: int) -> tuple[int, int]:
     before_count = arg & 0xFF
     after_count = (arg >> 8) & 0xFF
     return before_count, after_count
+
 
 def read_mapping_match_test(
     instructions: list[Instruction],
@@ -944,6 +1005,7 @@ def read_mapping_match_test(
         body_end_index=shape.inner_miss_index,
     )
 
+
 def read_mapping_match_header(
     instructions: list[Instruction],
     offset_to_index: dict[int, int],
@@ -968,6 +1030,7 @@ def read_mapping_match_header(
         keys_index=keys_index,
     )
 
+
 def read_empty_mapping_match_test(
     instructions: list[Instruction],
     header: MappingMatchHeader,
@@ -988,6 +1051,7 @@ def read_empty_mapping_match_test(
         body_start_index=body_start_index,
         body_end_index=header.miss_index,
     )
+
 
 def normalize_mapping_keys_index(
     instructions: list[Instruction],
@@ -1012,6 +1076,7 @@ def normalize_mapping_keys_index(
     ):
         return None
     return skip_match_prefix(instructions, length_jump_index + 1, end_index)
+
 
 def read_mapping_keys_shape(
     instructions: list[Instruction],
@@ -1053,6 +1118,7 @@ def read_mapping_keys_shape(
         unpack_index=unpack_index,
     )
 
+
 def read_mapping_keys(
     instructions: list[Instruction],
     keys_index: int,
@@ -1060,6 +1126,7 @@ def read_mapping_keys(
     if keys_index >= len(instructions):
         return None
     return mapping_match_keys(instructions[keys_index])
+
 
 def read_unpack_sequence_index(
     instructions: list[Instruction],
@@ -1075,6 +1142,7 @@ def read_unpack_sequence_index(
     if int(instructions[unpack_index].arg or 0) != item_count:
         return None
     return unpack_index
+
 
 def read_mapping_keys_test_indexes(
     instructions: list[Instruction],
@@ -1092,6 +1160,7 @@ def read_mapping_keys_test_indexes(
     ):
         return None
     return match_keys_index, copy_index, keys_jump_index
+
 
 def read_mapping_capture_shape(
     instructions: list[Instruction],
@@ -1123,6 +1192,7 @@ def read_mapping_capture_shape(
     )
     return MappingCaptureShape(patterns, rest_name, body_start_index)
 
+
 def read_mapping_value_capture_patterns(
     instructions: list[Instruction],
     offset_to_index: dict[int, int],
@@ -1145,11 +1215,13 @@ def read_mapping_value_capture_patterns(
         inner_miss_index,
     )
 
+
 def is_mapping_key_tuple(instructions: list[Instruction], index: int) -> bool:
     if index >= len(instructions):
         return False
     instruction = instructions[index]
     return instruction.opname == "LOAD_CONST" and isinstance(instruction.argval, tuple)
+
 
 def read_class_match_test(
     instructions: list[Instruction],
@@ -1186,6 +1258,7 @@ def read_class_match_test(
         miss_index=shape.miss_index,
         body_start_index=body_start_index,
     )
+
 
 def read_class_match_shape(
     instructions: list[Instruction],
@@ -1232,6 +1305,7 @@ def read_class_match_shape(
         unpack_index=unpack_index,
     )
 
+
 def read_class_match_indexes(
     instructions: list[Instruction],
     start_index: int,
@@ -1250,10 +1324,12 @@ def read_class_match_indexes(
         return None
     return keys_index, match_class_index, copy_index, jump_index
 
+
 def class_match_expr(instruction: Instruction) -> ast.expr | None:
     if instruction.opname not in {"LOAD_DEREF", "LOAD_GLOBAL", "LOAD_NAME"}:
         return None
     return ast.Name(id=safe_identifier(str(instruction.argval)), ctx=ast.Load())
+
 
 def class_match_keyword_attrs(instruction: Instruction) -> list[str] | None:
     if instruction.opname != "LOAD_CONST":
@@ -1267,6 +1343,7 @@ def class_match_keyword_attrs(instruction: Instruction) -> list[str] | None:
             return None
         attrs.append(safe_identifier(value))
     return attrs
+
 
 def is_class_match_test(
     instructions: list[Instruction],
@@ -1283,6 +1360,7 @@ def is_class_match_test(
     if copy.opname != "COPY" or int(copy.arg or 0) != 1:
         return False
     return is_mapping_keys_miss_jump(instructions[jump_index])
+
 
 def is_min_length_match_test(
     instructions: list[Instruction],
@@ -1301,9 +1379,9 @@ def is_min_length_match_test(
         return False
     jump = instructions[jump_index]
     return (
-        is_match_miss_jump(jump)
-        and int(jump.argval) == instructions[miss_index].offset
+        is_match_miss_jump(jump) and int(jump.argval) == instructions[miss_index].offset
     )
+
 
 def mapping_match_keys(instruction: Instruction) -> list[ast.expr] | None:
     if instruction.opname != "LOAD_CONST":
@@ -1311,6 +1389,7 @@ def mapping_match_keys(instruction: Instruction) -> list[ast.expr] | None:
     if not isinstance(instruction.argval, tuple):
         return None
     return [ast.Constant(value=value) for value in instruction.argval]
+
 
 def is_mapping_keys_test(
     instructions: list[Instruction],
@@ -1324,6 +1403,7 @@ def is_mapping_keys_test(
     if copy.opname != "COPY" or int(copy.arg or 0) != 1:
         return False
     return is_mapping_keys_miss_jump(instructions[jump_index])
+
 
 def is_fixed_length_sequence_test(
     instructions: list[Instruction],
@@ -1342,9 +1422,9 @@ def is_fixed_length_sequence_test(
         return False
     jump = instructions[jump_index]
     return (
-        is_match_miss_jump(jump)
-        and int(jump.argval) == instructions[miss_index].offset
+        is_match_miss_jump(jump) and int(jump.argval) == instructions[miss_index].offset
     )
+
 
 def read_sequence_patterns(
     instructions: list[Instruction],
@@ -1377,6 +1457,7 @@ def read_sequence_patterns(
         patterns.append(pattern)
     return patterns, skip_match_prefix(instructions, cursor, end_index)
 
+
 def read_nested_sequence_pattern(
     instructions: list[Instruction],
     offset_to_index: dict[int, int],
@@ -1396,6 +1477,7 @@ def read_nested_sequence_pattern(
     if nested.body_start_index is None:
         return None
     return nested.pattern, nested.body_start_index
+
 
 def read_class_match_patterns(
     instructions: list[Instruction],
@@ -1421,6 +1503,7 @@ def read_class_match_patterns(
         pattern, cursor = value_pattern
         patterns.append(pattern)
     return patterns, skip_match_prefix(instructions, cursor, miss_index)
+
 
 def read_class_value_pattern(
     instructions: list[Instruction],
@@ -1455,6 +1538,7 @@ def read_class_value_pattern(
         pattern = ast.MatchValue(value=ast.Constant(value=value))
     return pattern, skip_match_prefix(instructions, jump_index + 1, miss_index)
 
+
 def class_value_pattern_jump_matches(
     instructions: list[Instruction],
     compare_index: int,
@@ -1467,6 +1551,7 @@ def class_value_pattern_jump_matches(
     if compare.opname == "IS_OP" and int(compare.arg or 0) == 0:
         return is_match_miss_jump(jump)
     return False
+
 
 def read_starred_sequence_patterns(
     instructions: list[Instruction],
@@ -1507,6 +1592,7 @@ def read_starred_sequence_patterns(
     after_patterns, body_start_index = captures
     return [*before_patterns, star_pattern, *after_patterns], body_start_index
 
+
 def starred_sequence_capture_pattern(instruction: Instruction) -> ast.MatchStar | None:
     if instruction.opname == "POP_TOP":
         return ast.MatchStar(name=None)
@@ -1519,6 +1605,7 @@ def starred_sequence_capture_pattern(instruction: Instruction) -> ast.MatchStar 
         return ast.MatchStar(name=safe_identifier(str(instruction.argval)))
     return None
 
+
 MAPPING_REST_CLEANUP_OPS = {
     "BUILD_MAP",
     "COPY",
@@ -1528,6 +1615,7 @@ MAPPING_REST_CLEANUP_OPS = {
     "SWAP",
     "UNPACK_SEQUENCE",
 }
+
 
 def read_mapping_rest_capture_patterns(
     instructions: list[Instruction],
@@ -1553,6 +1641,7 @@ def read_mapping_rest_capture_patterns(
         cursor += 1
     return patterns, rest_name, skip_match_prefix(instructions, cursor, end_index)
 
+
 def skip_mapping_rest_cleanup(
     instructions: list[Instruction],
     cursor: int,
@@ -1568,6 +1657,7 @@ def skip_mapping_rest_cleanup(
         saw_cleanup = True
         cursor += 1
     return end_index
+
 
 def rest_capture_name(
     instructions: list[Instruction],
@@ -1587,6 +1677,7 @@ def rest_capture_name(
         return None
     return safe_identifier(str(instruction.argval))
 
+
 def skip_match_success_cleanup(
     instructions: list[Instruction],
     cursor: int,
@@ -1596,6 +1687,7 @@ def skip_match_success_cleanup(
     while cursor < end_index and instructions[cursor].opname == "POP_TOP":
         cursor = skip_match_prefix(instructions, cursor + 1, end_index)
     return cursor
+
 
 def sequence_capture_pattern(instruction: Instruction) -> ast.pattern | None:
     if instruction.opname == "POP_TOP":
@@ -1611,6 +1703,7 @@ def sequence_capture_pattern(instruction: Instruction) -> ast.pattern | None:
             name=safe_identifier(str(instruction.argval)),
         )
     return None
+
 
 def read_default_match_case(
     instructions: list[Instruction],
@@ -1634,6 +1727,7 @@ def read_default_match_case(
         body_end_index=body_end_index,
     )
 
+
 def skip_match_prefix(
     instructions: list[Instruction],
     cursor: int,
@@ -1642,6 +1736,7 @@ def skip_match_prefix(
     while cursor < end_index and instructions[cursor].opname in MATCH_PREFIX_OPS:
         cursor += 1
     return cursor
+
 
 def skip_match_subject_cleanup(
     instructions: list[Instruction],
@@ -1652,6 +1747,7 @@ def skip_match_subject_cleanup(
     if cursor < end_index and instructions[cursor].opname == "POP_TOP":
         return cursor + 1
     return cursor
+
 
 def is_match_miss_jump(instruction: Instruction) -> bool:
     opname = normalized_opcode_name(instruction.opname)
@@ -1664,13 +1760,16 @@ def is_match_miss_jump(instruction: Instruction) -> bool:
         "POP_JUMP_BACKWARD_IF_NOT_NONE",
     }
 
+
 def is_none_match_miss_jump(instruction: Instruction) -> bool:
     opname = normalized_opcode_name(instruction.opname)
     return "POP_JUMP" in opname and "IF_NOT_NONE" in opname
 
+
 def is_mapping_keys_miss_jump(instruction: Instruction) -> bool:
     opname = normalized_opcode_name(instruction.opname)
     return "POP_JUMP" in opname and "IF_NONE" in opname
+
 
 def find_terminal_body_end(
     instructions: list[Instruction],
@@ -1684,6 +1783,7 @@ def find_terminal_body_end(
         if is_match_terminal(instruction):
             return index + 1
     return None
+
 
 def is_match_cleanup_range(
     instructions: list[Instruction],
@@ -1700,6 +1800,7 @@ def is_match_cleanup_range(
         cursor += 1
     return True
 
+
 def is_match_terminal(instruction: Instruction) -> bool:
     return instruction.opname in {
         "INTERPRETER_EXIT",
@@ -1708,6 +1809,7 @@ def is_match_terminal(instruction: Instruction) -> bool:
         "RAISE_VARARGS",
         "RERAISE",
     }
+
 
 @dataclass(frozen=True, slots=True)
 class WithRegion:
@@ -1720,13 +1822,16 @@ class WithRegion:
     trailing_return_index: int | None = None
     is_async: bool = False
 
+
 WITH_CLEANUP_PREFIX_OPS = {"CACHE", "EXTENDED_ARG", "NOP"}
 WithSetupPredicate = Callable[[list[Instruction], int, int], bool]
+
 
 def make_with_item(
     context_expr: ast.expr, optional_vars: ast.expr | None = None
 ) -> ast.withitem:
     return ast.withitem(context_expr=context_expr, optional_vars=optional_vars)
+
 
 def make_with_statement(
     context_expr: ast.expr,
@@ -1738,6 +1843,7 @@ def make_with_statement(
         body=body or [ast.Pass()],
         type_comment=None,
     )
+
 
 def find_with_region(
     instructions: list[Instruction],
@@ -1764,6 +1870,7 @@ def find_with_region(
         context_index=None,
         is_nested_setup=is_before_with_instruction,
     )
+
 
 def find_async_with_region(
     instructions: list[Instruction],
@@ -1795,6 +1902,7 @@ def find_async_with_region(
         is_nested_setup=is_before_async_with_instruction,
     )
 
+
 LOAD_SPECIAL_WITH_CONTEXT_OPS = {
     "LOAD_NAME",
     "LOAD_GLOBAL",
@@ -1803,6 +1911,7 @@ LOAD_SPECIAL_WITH_CONTEXT_OPS = {
     "LOAD_FAST_BORROW",
     "LOAD_DEREF",
 }
+
 
 def find_load_special_with_region(
     instructions: list[Instruction],
@@ -1835,6 +1944,7 @@ def find_load_special_with_region(
         is_nested_setup=is_load_special_with_setup,
     )
 
+
 def find_load_special_async_with_region(
     instructions: list[Instruction],
     context_index: int,
@@ -1863,12 +1973,14 @@ def find_load_special_async_with_region(
         is_nested_setup=is_load_special_async_with_setup,
     )
 
+
 def is_before_with_instruction(
     instructions: list[Instruction],
     index: int,
     end_index: int,
 ) -> bool:
     return index < end_index and instructions[index].opname == "BEFORE_WITH"
+
 
 def is_before_async_with_instruction(
     instructions: list[Instruction],
@@ -1877,12 +1989,14 @@ def is_before_async_with_instruction(
 ) -> bool:
     return index < end_index and instructions[index].opname == "BEFORE_ASYNC_WITH"
 
+
 def is_load_special_async_with_setup(
     instructions: list[Instruction],
     index: int,
     end_index: int,
 ) -> bool:
     return load_special_async_with_setup_end(instructions, index, end_index) is not None
+
 
 def find_sync_with_body_region(
     instructions: list[Instruction],
@@ -1917,6 +2031,7 @@ def find_sync_with_body_region(
         return region
     return None
 
+
 def match_sync_with_body_end(
     instructions: list[Instruction],
     index: int,
@@ -1948,6 +2063,7 @@ def match_sync_with_body_end(
         returns_value=returns_value,
         trailing_return_index=trailing_return_index,
     )
+
 
 def find_async_with_body_region(
     instructions: list[Instruction],
@@ -1985,6 +2101,7 @@ def find_async_with_body_region(
         )
     return None
 
+
 def load_special_async_with_setup_end(
     instructions: list[Instruction],
     index: int,
@@ -2002,6 +2119,7 @@ def load_special_async_with_setup_end(
     ):
         return None
     return setup_with_index
+
 
 def is_load_special_async_with_prefix(
     instructions: list[Instruction],
@@ -2025,6 +2143,7 @@ def is_load_special_async_with_prefix(
         and instructions[index + 6].opname == "CALL"
         and int(instructions[index + 6].arg or 0) == 0
     )
+
 
 def is_load_special_with_setup(
     instructions: list[Instruction],
@@ -2050,6 +2169,7 @@ def is_load_special_with_setup(
         and instructions[index + 7].opname == "SETUP_WITH"
     )
 
+
 def read_with_target(
     instructions: list[Instruction],
     start_index: int,
@@ -2072,6 +2192,7 @@ def read_with_target(
     }:
         return cursor, cursor + 1
     return None, None
+
 
 def match_with_cleanup(
     instructions: list[Instruction],
@@ -2134,6 +2255,7 @@ def match_with_cleanup(
         cursor = skip_returning_with_exception_handler(instructions, cursor, end_index)
     return cursor, returns_value, trailing_return_index
 
+
 def match_exceptional_with_cleanup(
     instructions: list[Instruction],
     terminal_index: int,
@@ -2164,6 +2286,7 @@ def match_exceptional_with_cleanup(
             return index + 1
     return None
 
+
 def match_async_with_cleanup(
     instructions: list[Instruction],
     start_index: int,
@@ -2180,11 +2303,11 @@ def match_async_with_cleanup(
         returns_value = True
         cursor += 1
 
-    cursor = read_async_with_cleanup_call_end(instructions, cursor, end_index)
-    if cursor is None:
+    call_end = read_async_with_cleanup_call_end(instructions, cursor, end_index)
+    if call_end is None:
         return None
 
-    cursor = skip_with_cleanup_prefix(instructions, cursor, end_index)
+    cursor = skip_with_cleanup_prefix(instructions, call_end, end_index)
     if cursor >= end_index or instructions[cursor].opname != "POP_TOP":
         return None
     cursor += 1
@@ -2209,6 +2332,7 @@ def match_async_with_cleanup(
     cursor = skip_async_with_exception_handler(instructions, cursor, end_index)
     return cursor, returns_value, trailing_return_index
 
+
 def read_async_with_cleanup_call_end(
     instructions: list[Instruction],
     cursor: int,
@@ -2229,6 +2353,7 @@ def read_async_with_cleanup_call_end(
     ):
         return None
     return skip_async_with_await(instructions, cursor + 1, end_index)
+
 
 def skip_async_with_exception_handler(
     instructions: list[Instruction],
@@ -2272,6 +2397,7 @@ def skip_async_with_exception_handler(
             return index + 1
     return start_index
 
+
 def skip_async_with_await(
     instructions: list[Instruction],
     start_index: int,
@@ -2297,6 +2423,7 @@ def skip_async_with_await(
             return index + 1
     return None
 
+
 def skip_optional_pop_block(
     instructions: list[Instruction],
     cursor: int,
@@ -2306,6 +2433,7 @@ def skip_optional_pop_block(
     if cursor < end_index and instructions[cursor].opname == "POP_BLOCK":
         return cursor + 1
     return cursor
+
 
 def skip_returning_with_exception_handler(
     instructions: list[Instruction],
@@ -2329,6 +2457,7 @@ def skip_returning_with_exception_handler(
             )
     return start_index
 
+
 def skip_chained_returning_with_cleanup(
     instructions: list[Instruction],
     start_index: int,
@@ -2351,6 +2480,7 @@ def skip_chained_returning_with_cleanup(
         cursor = skipped
     return cursor
 
+
 def skip_with_cleanup_prefix(
     instructions: list[Instruction],
     cursor: int,
@@ -2360,12 +2490,14 @@ def skip_with_cleanup_prefix(
         cursor += 1
     return cursor
 
+
 def is_none_load(instruction: Instruction) -> bool:
     if instruction.opname == "LOAD_CONST":
         return instruction.argval is None
     if instruction.opname == "RETURN_CONST":
         return instruction.argval is None
     return False
+
 
 def is_none_return(instruction: Instruction) -> bool:
     if instruction.opname == "RETURN_CONST":

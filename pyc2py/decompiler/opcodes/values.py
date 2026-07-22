@@ -11,13 +11,15 @@ from pyc2py.pyc.objects import (
 )
 
 EMPTY_SLICE_STEP_NAME = "__pyc2py_empty_slice_step__"
-UNHANDLED_CONSTANT = object()
+
 
 def is_code_constant(value: Any) -> bool:
     return isinstance(value, ast.Constant) and hasattr(value.value, "co_code")
 
+
 def is_zero_constant(value: Any) -> bool:
     return isinstance(value, ast.Constant) and value.value == 0
+
 
 def make_constant(
     value: Any,
@@ -29,20 +31,21 @@ def make_constant(
         return ast.Constant(value=value)
 
     special = make_special_constant(value, legacy_strings_as_bytes, negative_nan)
-    if special is not UNHANDLED_CONSTANT:
+    if special is not None:
         return special
 
     collection = make_collection_constant(value, legacy_strings_as_bytes)
-    if collection is not UNHANDLED_CONSTANT:
+    if collection is not None:
         return collection
 
     return ast.Constant(value=value)
+
 
 def make_special_constant(
     value: Any,
     legacy_strings_as_bytes: bool,
     negative_nan: bool | None,
-) -> ast.expr | object:
+) -> ast.expr | None:
     if isinstance(value, LegacyByteString):
         return make_legacy_byte_string_constant(value, legacy_strings_as_bytes)
     if isinstance(value, LegacyLong):
@@ -51,12 +54,13 @@ def make_special_constant(
         return make_nan_constant(value, negative_nan)
     if isinstance(value, int) and not isinstance(value, bool):
         return ast.Constant(value=int(value))
-    return UNHANDLED_CONSTANT
+    return None
+
 
 def make_collection_constant(
     value: Any,
     legacy_strings_as_bytes: bool,
-) -> ast.expr | object:
+) -> ast.expr | None:
     if isinstance(value, (tuple, list)):
         return make_sequence_constant(value, legacy_strings_as_bytes)
     if isinstance(value, MarshalSetValue):
@@ -70,7 +74,8 @@ def make_collection_constant(
         return make_frozen_dict_constant(value)
     if isinstance(value, slice):
         return make_slice_constant(value)
-    return UNHANDLED_CONSTANT
+    return None
+
 
 def make_legacy_byte_string_constant(
     value: LegacyByteString,
@@ -80,12 +85,14 @@ def make_legacy_byte_string_constant(
         return ast.Constant(value=value.encode("latin-1", errors="surrogateescape"))
     return ast.Constant(value=str(value))
 
+
 def make_legacy_long_constant(value: LegacyLong) -> ast.Call:
     return ast.Call(
         func=make_name("__pyc2py_long__", ast.Load()),
         args=[ast.Constant(value=int(value))],
         keywords=[],
     )
+
 
 def make_nan_constant(value: float, negative_nan: bool | None) -> ast.expr:
     is_negative_nan = math.copysign(1.0, value) < 0
@@ -99,6 +106,7 @@ def make_nan_constant(value: float, negative_nan: bool | None) -> ast.expr:
         )
     return ast.Constant(value=float("nan"))
 
+
 def make_sequence_constant(
     value: tuple[Any, ...] | list[Any],
     legacy_strings_as_bytes: bool,
@@ -108,11 +116,13 @@ def make_sequence_constant(
         return ast.Tuple(elts=elements, ctx=ast.Load())
     return ast.List(elts=elements, ctx=ast.Load())
 
+
 def make_set_constant(
     values: Any,
     legacy_strings_as_bytes: bool,
 ) -> ast.Set:
     return ast.Set(elts=make_constant_elements(values, legacy_strings_as_bytes))
+
 
 def make_constant_elements(
     values: Any,
@@ -122,6 +132,7 @@ def make_constant_elements(
         make_constant(item, legacy_strings_as_bytes=legacy_strings_as_bytes)
         for item in values
     ]
+
 
 def make_frozen_dict_constant(value: FrozenDictValue) -> ast.Call:
     return ast.Call(
@@ -135,6 +146,7 @@ def make_frozen_dict_constant(value: FrozenDictValue) -> ast.Call:
         keywords=[],
     )
 
+
 def make_slice_constant(value: slice) -> ast.Call:
     return ast.Call(
         func=make_name("slice", ast.Load()),
@@ -146,10 +158,12 @@ def make_slice_constant(value: slice) -> ast.Call:
         keywords=[],
     )
 
+
 def none_to_empty(value: ast.expr) -> ast.expr | None:
     if is_none_constant(value):
         return None
     return value
+
 
 BINARY_OPS: dict[str, type[ast.operator]] = {
     "+": ast.Add,
@@ -218,6 +232,7 @@ COMPARE_OPS: dict[str, type[ast.cmpop]] = {
     "is not": ast.IsNot,
 }
 
+
 def conversion_for_format_flags(flags: int) -> int:
     conversion = flags & 0x03
 
@@ -229,6 +244,7 @@ def conversion_for_format_flags(flags: int) -> int:
         return ord("a")
     return -1
 
+
 def conversion_for_convert_value(arg: int) -> int:
     if arg == 1:
         return ord("s")
@@ -237,6 +253,7 @@ def conversion_for_convert_value(arg: int) -> int:
     if arg == 3:
         return ord("a")
     return -1
+
 
 def make_joined_formatted_value(
     value: ast.expr,
@@ -253,12 +270,14 @@ def make_joined_formatted_value(
         ]
     )
 
+
 def make_converted_formatted_value(value: ast.expr, arg: int) -> ast.FormattedValue:
     return ast.FormattedValue(
         value=value,
         conversion=conversion_for_convert_value(arg),
         format_spec=None,
     )
+
 
 def make_formatted_with_spec(
     value: ast.expr,
@@ -269,6 +288,7 @@ def make_formatted_with_spec(
         return ast.JoinedStr(values=[value])
     return make_joined_formatted_value(value, -1, format_spec)
 
+
 def make_slice(
     lower: ast.expr | None,
     upper: ast.expr | None,
@@ -276,8 +296,10 @@ def make_slice(
 ) -> ast.Slice:
     return ast.Slice(lower=lower, upper=upper, step=step)
 
+
 def make_empty_slice_step() -> ast.Name:
     return make_name(EMPTY_SLICE_STEP_NAME, ast.Load())
+
 
 def make_subscript(
     value: ast.expr,
@@ -286,8 +308,10 @@ def make_subscript(
 ) -> ast.Subscript:
     return ast.Subscript(value=value, slice=slice_value, ctx=ctx)
 
+
 def make_binary_subscript(value: ast.expr, index: ast.expr) -> ast.Subscript:
     return make_subscript(value, index, ast.Load())
+
 
 def make_binary_slice(
     value: ast.expr,
@@ -295,6 +319,7 @@ def make_binary_slice(
     stop: ast.expr | None,
 ) -> ast.Subscript:
     return make_subscript(value, make_slice(start, stop), ast.Load())
+
 
 def make_slice_operand(
     count: int,
@@ -307,6 +332,7 @@ def make_slice_operand(
     if count == 3:
         return make_slice(start, stop, step)
     return None
+
 
 def make_legacy_slice_operand(
     mode: str,
@@ -322,26 +348,31 @@ def make_legacy_slice_operand(
         return target_value, make_slice(None, upper)
     return target_value, make_slice(lower, upper)
 
+
 def make_attr_load(name: str, target_value: ast.expr) -> ast.Attribute:
     return ast.Attribute(value=target_value, attr=name, ctx=ast.Load())
 
+
 def make_subscript_store(
     target_value: ast.expr,
-    index: ast.expr | ast.slice,
+    index: ast.expr | ast.Slice,
     value: ast.expr,
 ) -> ast.Assign:
     target = make_subscript(target_value, index, ast.Store())
     return ast.Assign(targets=[target], value=value)
 
+
 def make_attr_store(name: str, target_value: ast.expr, value: ast.expr) -> ast.Assign:
     target = ast.Attribute(value=target_value, attr=name, ctx=ast.Store())
     return ast.Assign(targets=[target], value=value)
 
+
 def make_subscript_delete(
-    target_value: ast.expr, index: ast.expr | ast.slice
+    target_value: ast.expr, index: ast.expr | ast.Slice
 ) -> ast.Delete:
     target = make_subscript(target_value, index, ast.Del())
     return ast.Delete(targets=[target])
+
 
 def make_attr_delete(name: str, target_value: ast.expr) -> ast.Delete:
     target = ast.Attribute(value=target_value, attr=name, ctx=ast.Del())

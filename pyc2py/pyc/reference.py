@@ -1,9 +1,11 @@
 from dataclasses import dataclass, field
 from typing import Any
+
 from pyc2py.constants import MAX_MARSHAL_OBJECTS
 
 FLAG_REF = 0x80
 TYPE_REF = ord("r")
+
 
 @dataclass(slots=True)
 class ReferenceTable:
@@ -45,6 +47,7 @@ class ReferenceTable:
     def check_capacity(self) -> None:
         if len(self.values) >= self.max_values:
             raise ValueError("marshal reference table exceeded local limit")
+
 
 def split_type_code(code: int) -> tuple[int, bool]:
     return code & ~FLAG_REF, bool(code & FLAG_REF)

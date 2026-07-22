@@ -1,4 +1,5 @@
 import ast
+from typing import TypeGuard
 
 from pyc2py.astree import make_name
 from pyc2py.bytecode.instruction import Instruction
@@ -20,6 +21,7 @@ from pyc2py.decompiler.structures import (
     loop_entry_offsets,
     skip_loop_cleanup,
 )
+
 
 class ControlLoopRecoveryMixin(ControlComprehensionRecoveryMixin):
     def try_translate_modern_infinite_while_loop(
@@ -365,7 +367,10 @@ class ControlLoopRecoveryMixin(ControlComprehensionRecoveryMixin):
             | frozenset({continue_offset})
             | extra_continue_offsets
         )
-        child.loop_none_return_is_break = break_index >= len(instructions)
+        child.loop_none_return_is_break = loop_exit_is_none_return(
+            instructions,
+            break_index,
+        )
         if break_index < len(instructions):
             child.loop_break_offsets = self.loop_break_offsets | frozenset(
                 {int(instructions[break_index].offset)}
@@ -482,6 +487,25 @@ class ControlLoopRecoveryMixin(ControlComprehensionRecoveryMixin):
             cursor += 1
         return ast.Tuple(elts=targets, ctx=ast.Store()), cursor
 
+
+def loop_exit_is_none_return(
+    instructions: list[Instruction],
+    break_index: int,
+) -> bool:
+    if break_index >= len(instructions):
+        return True
+    cursor = skip_ignorable_instructions(instructions, break_index, len(instructions))
+    if cursor >= len(instructions):
+        return True
+    instruction = instructions[cursor]
+    if instruction.opname == "RETURN_CONST":
+        return instruction.argval is None
+    if instruction.opname != "LOAD_CONST" or instruction.argval is not None:
+        return False
+    cursor = skip_ignorable_instructions(instructions, cursor + 1, len(instructions))
+    return cursor < len(instructions) and instructions[cursor].opname == "RETURN_VALUE"
+
+
 def previous_non_metadata_index(
     instructions: list[Instruction],
     cursor: int,
@@ -506,6 +530,7 @@ def find_setup_loop_get_iter(
             return None
     return None
 
+
 def simplify_loop_guard_continue(statements: list[ast.stmt]) -> list[ast.stmt]:
     for index, statement in enumerate(statements):
         if not is_guard_continue(statement):
@@ -522,7 +547,8 @@ def simplify_loop_guard_continue(statements: list[ast.stmt]) -> list[ast.stmt]:
         ]
     return statements
 
-def is_guard_continue(statement: ast.stmt) -> bool:
+
+def is_guard_continue(statement: ast.stmt) -> TypeGuard[ast.If]:
     if not isinstance(statement, ast.If):
         return False
     if statement.orelse:

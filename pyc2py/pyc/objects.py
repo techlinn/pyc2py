@@ -1,30 +1,39 @@
 from dataclasses import dataclass
 from typing import Any, Protocol
+
 from pyc2py.constants import MAX_MARSHAL_COLLECTION_ITEMS
 from pyc2py.pyc.primitives import read_exact, read_int32, read_size, read_uint8
+
 
 class ObjectReader(Protocol):
     def read_object(self, offset: int, depth: int = 0) -> tuple[Any, int]: ...
 
+
 class NullObject:
     __slots__ = ()
 
+
 NULL_OBJECT = NullObject()
+
 
 class LegacyByteString(str):
     __slots__ = ()
 
+
 class LegacyLong(int):
     __slots__ = ()
+
 
 @dataclass(slots=True)
 class FrozenDictValue:
     items: tuple[tuple[Any, Any], ...]
 
+
 @dataclass(frozen=True, slots=True)
 class MarshalSetValue:
     items: tuple[Any, ...]
     frozen: bool
+
 
 def read_dict(
     reader: ObjectReader, offset: int, depth: int
@@ -40,6 +49,7 @@ def read_dict(
         result[key] = value
     raise ValueError("marshal dictionary exceeded item limit")
 
+
 def read_frozen_dict(
     reader: ObjectReader, offset: int, depth: int
 ) -> tuple[FrozenDictValue, int]:
@@ -54,6 +64,7 @@ def read_frozen_dict(
         items.append((key, value))
     raise ValueError("marshal frozendict exceeded item limit")
 
+
 def read_tuple(
     reader: ObjectReader,
     data: bytes,
@@ -63,6 +74,7 @@ def read_tuple(
     size, offset = read_size(data, offset)
     return read_tuple_items(reader, offset, size, depth)
 
+
 def read_small_tuple(
     reader: ObjectReader,
     data: bytes,
@@ -71,6 +83,7 @@ def read_small_tuple(
 ) -> tuple[tuple[Any, ...], int]:
     size, offset = read_uint8(data, offset)
     return read_tuple_items(reader, offset, size, depth)
+
 
 def read_list(
     reader: ObjectReader,
@@ -87,6 +100,7 @@ def read_list(
         values.append(value)
 
     return values, offset
+
 
 def read_set(
     reader: ObjectReader,
@@ -105,6 +119,7 @@ def read_set(
 
     return MarshalSetValue(tuple(values), frozen=frozen), offset
 
+
 def read_slice(
     reader: ObjectReader,
     offset: int,
@@ -117,6 +132,7 @@ def read_slice(
     if start is NULL_OBJECT or stop is NULL_OBJECT or step is NULL_OBJECT:
         raise ValueError("marshal slice component cannot be null sentinel")
     return slice(start, stop, step), offset
+
 
 def read_tuple_items(
     reader: ObjectReader,
@@ -133,35 +149,43 @@ def read_tuple_items(
 
     return tuple(values), offset
 
+
 def require_collection_size(size: int) -> None:
     if size < 0:
         raise ValueError("marshal collection size is negative")
     if size > MAX_MARSHAL_COLLECTION_ITEMS:
         raise ValueError("marshal collection exceeded item limit")
 
+
 def read_bytes(data: bytes, offset: int) -> tuple[bytes, int]:
     size, offset = read_size(data, offset)
     return read_sized_bytes(data, offset, size)
+
 
 def read_short_bytes(data: bytes, offset: int) -> tuple[bytes, int]:
     size, offset = read_uint8(data, offset)
     return read_sized_bytes(data, offset, size)
 
+
 def read_text(data: bytes, offset: int) -> tuple[str, int]:
     raw, offset = read_bytes(data, offset)
     return raw.decode("utf-8", errors="surrogatepass"), offset
+
 
 def read_ascii(data: bytes, offset: int) -> tuple[str, int]:
     raw, offset = read_bytes(data, offset)
     return raw.decode("ascii"), offset
 
+
 def read_short_ascii(data: bytes, offset: int) -> tuple[str, int]:
     raw, offset = read_short_bytes(data, offset)
     return raw.decode("ascii"), offset
 
+
 def read_sized_bytes(data: bytes, offset: int, size: int) -> tuple[bytes, int]:
     raw = read_exact(data, offset, size)
     return raw, offset + size
+
 
 STRING_READERS = {
     ord("u"): read_text,
@@ -171,6 +195,7 @@ STRING_READERS = {
     ord("Z"): read_short_ascii,
 }
 INTERNED_STRING_CODES = {ord("t"), ord("A"), ord("Z")}
+
 
 def read_marshal_string(
     data: bytes,
@@ -197,6 +222,7 @@ def read_marshal_string(
         interned.append(value)
     return value, offset
 
+
 def read_legacy_sensitive_string(
     data: bytes,
     type_code: int,
@@ -204,10 +230,10 @@ def read_legacy_sensitive_string(
     version: tuple[int, ...],
 ) -> tuple[Any, int]:
     if type_code == ord("s") or version < (3, 0):
-        value, offset = read_bytes(data, offset)
+        raw, offset = read_bytes(data, offset)
         if version < (3, 0):
-            value = LegacyByteString(
-                value.decode("latin-1", errors="surrogateescape")
-            )
-        return value, offset
+            return LegacyByteString(
+                raw.decode("latin-1", errors="surrogateescape")
+            ), offset
+        return raw, offset
     return read_text(data, offset)

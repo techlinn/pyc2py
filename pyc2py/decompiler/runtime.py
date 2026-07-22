@@ -1,6 +1,7 @@
 import ast
 from dataclasses import dataclass
 from typing import Any
+
 from pyc2py.astree import (
     expression_key,
     make_name,
@@ -16,16 +17,25 @@ from pyc2py.decompiler.opcodes.imports_calls import (
 from pyc2py.decompiler.opcodes.values import is_code_constant
 from pyc2py.decompiler.recover import (
     make_arguments as recover_make_arguments,
+)
+from pyc2py.decompiler.recover import (
     make_class_node as recover_make_class_node,
+)
+from pyc2py.decompiler.recover import (
     make_dict_comp,
-    make_function_node as recover_make_function_node,
     make_generator,
     make_generator_exp,
     make_list_comp,
     make_set_comp,
+)
+from pyc2py.decompiler.recover import (
+    make_function_node as recover_make_function_node,
+)
+from pyc2py.decompiler.recover import (
     with_code_docstring as recover_with_code_docstring,
 )
 from pyc2py.decompiler.structures import invert_condition
+
 
 @dataclass(frozen=True, slots=True)
 class FunctionValue:
@@ -37,16 +47,19 @@ class FunctionValue:
     type_params: tuple[ast.expr, ...] = ()
     annotate: "FunctionValue | None" = None
 
+
 @dataclass(frozen=True, slots=True)
 class BuildClassValue:
     # marker for a pending __build_class__ call
     pass
+
 
 @dataclass(frozen=True, slots=True)
 class ClassValue:
     code: Any
     bases: tuple[ast.expr, ...]
     type_params: tuple[ast.expr, ...] = ()
+
 
 @dataclass(frozen=True, slots=True)
 class ComprehensionLoopShape:
@@ -58,9 +71,11 @@ class ComprehensionLoopShape:
     store_index: int
     target: ast.expr
 
+
 @dataclass(frozen=True, slots=True)
 class HiddenLocalRestore:
     name: str
+
 
 @dataclass(frozen=True, slots=True)
 class TypeAliasValue:
@@ -68,10 +83,12 @@ class TypeAliasValue:
     value: ast.expr
     type_params: tuple[ast.expr, ...] = ()
 
+
 @dataclass(frozen=True, slots=True)
 class UnpackSlot:
     group: "UnpackGroup"
     index: int
+
 
 @dataclass(slots=True)
 class UnpackGroup:
@@ -79,10 +96,12 @@ class UnpackGroup:
     targets: list[ast.expr | None]
     starred_index: int | None = None
 
+
 def decompile_native_source(code: Any, version: tuple[int, ...] | None) -> Any | None:
     from pyc2py.decompiler.engine import NativeDecompiler
 
     return NativeDecompiler(code=code, version=version, is_module=True).decompile()
+
 
 def unpack_counts(instruction: Instruction) -> tuple[int, int | None]:
     if instruction.opname == "UNPACK_SEQUENCE_TWO_TUPLE":
@@ -96,6 +115,7 @@ def unpack_counts(instruction: Instruction) -> tuple[int, int | None]:
     after_count = (arg >> 8) & 0xFF
     return before_count + after_count + 1, before_count
 
+
 def make_function_def(
     name: str,
     code: Any,
@@ -106,7 +126,7 @@ def make_function_def(
     decorators: tuple[ast.expr, ...] = (),
     type_params: tuple[ast.AST, ...] = (),
     annotate: FunctionValue | None = None,
-) -> ast.FunctionDef:
+) -> ast.FunctionDef | ast.AsyncFunctionDef:
     from pyc2py.decompiler.engine import NativeDecompiler
 
     body_result = NativeDecompiler(
@@ -128,8 +148,9 @@ def make_function_def(
         apply_function_annotations(function, resolved_annotations)
 
     function.decorator_list = list(decorators)
-    function.type_params = list(type_params)
+    setattr(function, "type_params", list(type_params))
     return function
+
 
 def function_annotations_from_code(
     code: Any,
@@ -148,6 +169,7 @@ def function_annotations_from_code(
             return annotation_dict_from_ast_dict_literal(statement.value)
     return None
 
+
 def annotation_dict_from_ast_dict_literal(
     value: ast.Dict,
 ) -> dict[str, ast.expr] | None:
@@ -157,6 +179,7 @@ def annotation_dict_from_ast_dict_literal(
             return None
         result[key.value] = annotation
     return result
+
 
 def apply_function_annotations(
     function: ast.FunctionDef | ast.AsyncFunctionDef,
@@ -175,6 +198,7 @@ def apply_function_annotations(
     if returns is not None:
         function.returns = returns
 
+
 def normalize_vararg_annotation(annotation: ast.expr) -> ast.expr:
     if not isinstance(annotation, ast.Subscript):
         return annotation
@@ -184,6 +208,7 @@ def normalize_vararg_annotation(annotation: ast.expr) -> ast.expr:
         return annotation
     return ast.Starred(value=annotation.value, ctx=ast.Load())
 
+
 def function_annotation_arguments(arguments: ast.arguments) -> list[ast.arg]:
     result = [*arguments.posonlyargs, *arguments.args, *arguments.kwonlyargs]
     if arguments.vararg is not None:
@@ -191,6 +216,7 @@ def function_annotation_arguments(arguments: ast.arguments) -> list[ast.arg]:
     if arguments.kwarg is not None:
         result.append(arguments.kwarg)
     return result
+
 
 def make_class_def(
     name: str,
@@ -206,8 +232,9 @@ def make_class_def(
     ).decompile()
     body_module = parse_body_or_empty(body_result)
     class_node = recover_make_class_node(name, bases, body_module.body)
-    class_node.type_params = list(type_params)
+    setattr(class_node, "type_params", list(type_params))
     return class_node
+
 
 def make_class_value(arguments: list[Any], version: tuple[int, ...] | None) -> Any:
     if len(arguments) < 2:
@@ -225,6 +252,7 @@ def make_class_value(arguments: list[Any], version: tuple[int, ...] | None) -> A
     bases = make_class_bases(arguments[2:], version)
     return ClassValue(code=function.code, bases=bases)
 
+
 def make_class_bases(
     raw_bases: list[Any],
     version: tuple[int, ...] | None,
@@ -233,6 +261,7 @@ def make_class_bases(
     if version is not None and (3, 0) <= version < (3, 5):
         return tuple(reversed(bases))
     return bases
+
 
 def make_lambda_expr(
     code: Any,
@@ -250,6 +279,7 @@ def make_lambda_expr(
             return make_lambda_node(code, statement.value, defaults, kw_defaults)
     return make_lambda_node(code, ast.Constant(value=None), defaults, kw_defaults)
 
+
 def make_lambda_node(
     code: Any,
     body: ast.expr,
@@ -263,6 +293,7 @@ def make_lambda_node(
             kw_defaults.get(argument.arg) for argument in arguments.kwonlyargs
         ]
     return ast.Lambda(args=arguments, body=body)
+
 
 def make_generator_expr(
     code: Any,
@@ -297,6 +328,7 @@ def make_generator_expr(
     if shape is None:
         return None
     return make_sync_generator_expr(code, iterable, version, shape)
+
 
 def make_sync_generator_expr(
     code: Any,
@@ -346,6 +378,7 @@ def make_sync_generator_expr(
     generators[-1].ifs.extend(conditions)
     return make_generator_exp(element, generators)
 
+
 def make_comprehension_expr(
     code: Any,
     iterable: ast.expr,
@@ -371,6 +404,7 @@ def make_comprehension_expr(
     if shape is None:
         return None
     return make_sync_comprehension_expr(code, iterable, version, code_name, shape)
+
 
 def make_sync_comprehension_expr(
     code: Any,
@@ -419,6 +453,7 @@ def make_sync_comprehension_expr(
         return None
     return make_dict_comp(stack_values[-2], stack_values[-1], [generator])
 
+
 def read_comprehension_loop_shape(
     instructions: list[Instruction],
     offset_to_index: dict[int, int],
@@ -459,6 +494,7 @@ def read_comprehension_loop_shape(
         store_index=store_index,
         target=target,
     )
+
 
 def make_async_generator_expr(
     code: Any,
@@ -520,6 +556,7 @@ def make_async_generator_expr(
     generator.ifs.extend(conditions)
     return make_generator_exp(element, [generator])
 
+
 def find_async_generator_store(
     instructions: list[Instruction],
     offset_to_index: dict[int, int],
@@ -549,6 +586,7 @@ def find_async_generator_store(
         return None
     return store_index
 
+
 def async_generator_end_send_index(
     instructions: list[Instruction],
     offset_to_index: dict[int, int],
@@ -566,6 +604,7 @@ def async_generator_end_send_index(
         return None
     return end_send_index
 
+
 def find_async_generator_yield_wrap(
     instructions: list[Instruction],
     start_index: int,
@@ -579,6 +618,7 @@ def find_async_generator_yield_wrap(
             return index
     return None
 
+
 def intrinsic_1_name(instruction: Instruction) -> str:
     if isinstance(instruction.argval, str):
         return instruction.argval
@@ -587,6 +627,7 @@ def intrinsic_1_name(instruction: Instruction) -> str:
     if instruction.arg == 4:
         return "INTRINSIC_ASYNC_GEN_WRAP"
     return str(instruction.arg)
+
 
 def unwrap_async_iterator_call(iterable: ast.expr) -> ast.expr:
     if not isinstance(iterable, ast.Call):
@@ -599,6 +640,7 @@ def unwrap_async_iterator_call(iterable: ast.expr) -> ast.expr:
         return iterable
     return iterable.func.value
 
+
 def find_generator_iterator_load(instructions: list[Instruction]) -> int | None:
     for index, instruction in enumerate(instructions):
         if instruction.opname != "LOAD_FAST":
@@ -606,6 +648,7 @@ def find_generator_iterator_load(instructions: list[Instruction]) -> int | None:
         if instruction.argval == ".0":
             return index
     return None
+
 
 def comprehension_target_from_store(
     instructions: list[Instruction],
@@ -639,6 +682,7 @@ def comprehension_target_from_store(
         cursor += 1
     return ast.Tuple(elts=targets, ctx=ast.Store())
 
+
 def find_comprehension_update(
     instructions: list[Instruction],
     start_index: int,
@@ -657,6 +701,7 @@ def find_comprehension_update(
             return index
     return None
 
+
 def find_generator_yield(
     instructions: list[Instruction],
     start_index: int,
@@ -666,6 +711,7 @@ def find_generator_yield(
         if instructions[index].opname == "YIELD_VALUE":
             return index
     return None
+
 
 def read_nested_generator_loop(
     code: Any,
@@ -704,6 +750,7 @@ def read_nested_generator_loop(
     target, store_index = nested
     return make_generator(target=target, iterator=iterator), store_index + 1
 
+
 def read_nested_generator_loop_shape(
     instructions: list[Instruction],
     offset_to_index: dict[int, int],
@@ -737,6 +784,7 @@ def read_nested_generator_loop_shape(
         return None
     return target, store_index
 
+
 def find_nested_generator_get_iter(
     instructions: list[Instruction],
     start_index: int,
@@ -748,6 +796,7 @@ def find_nested_generator_get_iter(
         if instructions[index].opname in {"FOR_ITER", "YIELD_VALUE"}:
             return None
     return None
+
 
 def read_generator_conditions(
     code: Any,
@@ -786,6 +835,7 @@ def read_generator_conditions(
         cursor = target_index
     return start_index, []
 
+
 def find_generator_condition_jump(
     instructions: list[Instruction],
     start_index: int,
@@ -808,6 +858,7 @@ def find_generator_condition_jump(
             continue
         return index
     return None
+
 
 def evaluate_generator_expression(
     code: Any,
@@ -836,6 +887,7 @@ def evaluate_generator_expression(
     if not values:
         return None
     return values[-1]
+
 
 def evaluate_conditional_expression(
     code: Any,
@@ -905,6 +957,7 @@ def evaluate_conditional_expression(
         return ast.IfExp(test=test, body=body, orelse=orelse)
     return None
 
+
 def find_conditional_expression_body_end(
     instructions: list[Instruction],
     offset_to_index: dict[int, int],
@@ -922,6 +975,7 @@ def find_conditional_expression_body_end(
         if target_index == end_index:
             return index
     return None
+
 
 def evaluate_expression_stack(
     code: Any,
@@ -945,6 +999,7 @@ def evaluate_expression_stack(
         return []
     return [coerce_expr(value) for value in child.stack[starting_depth:]]
 
+
 def run_expression_jump(
     decompiler: Any,
     instruction: Instruction,
@@ -955,6 +1010,7 @@ def run_expression_jump(
     if instruction.opname.startswith("POP_JUMP"):
         pending_conditions.append(coerce_expr(decompiler.pop_or_none()))
     return True
+
 
 def merge_expression_jump_conditions(
     decompiler: Any,
@@ -977,6 +1033,7 @@ def merge_expression_jump_conditions(
     if current is not None:
         decompiler.stack.append(current)
 
+
 def merge_chained_compare(left: ast.expr, right: ast.expr) -> ast.Compare | None:
     if not isinstance(left, ast.Compare) or not isinstance(right, ast.Compare):
         return None
@@ -990,6 +1047,7 @@ def merge_chained_compare(left: ast.expr, right: ast.expr) -> ast.Compare | None
         comparators=[*left.comparators, *right.comparators],
     )
 
+
 def coerce_expr(value: Any) -> ast.expr:
     coerced = coerce_runtime_value(value)
     if coerced is not None:
@@ -999,6 +1057,7 @@ def coerce_expr(value: Any) -> ast.expr:
             return ast.Constant(value=None)
         return value
     return ast.Constant(value=None)
+
 
 def coerce_runtime_value(value: Any) -> ast.expr | None:
     if isinstance(value, BuildClassValue):
@@ -1017,10 +1076,12 @@ def coerce_runtime_value(value: Any) -> ast.expr | None:
         )
     return None
 
+
 def coerce_import_expr(value: ImportValue | ImportedAttributeValue) -> ast.expr:
     if isinstance(value, ImportValue):
         return make_name(value.name.split(".")[0], ast.Load())
     return make_name(value.name, ast.Load())
+
 
 def make_type_alias_call_expr(value: TypeAliasValue) -> ast.Call:
     type_params: ast.expr
@@ -1034,6 +1095,7 @@ def make_type_alias_call_expr(value: TypeAliasValue) -> ast.Call:
         keywords=[ast.keyword(arg="type_params", value=type_params)],
     )
 
+
 def parse_body_or_empty(result: Any | None) -> ast.Module:
     if result is None:
         return ast.Module(body=[], type_ignores=[])
@@ -1042,20 +1104,24 @@ def parse_body_or_empty(result: Any | None) -> ast.Module:
     except SyntaxError:
         return ast.Module(body=[], type_ignores=[])
 
+
 def is_coroutine_code(code: Any) -> bool:
     flags = int(getattr(code, "co_flags", 0) or 0)
     return bool(flags & 0x280)
+
 
 def make_slice(start: Any, stop: Any) -> ast.Slice:
     lower = none_to_empty(start)
     upper = none_to_empty(stop)
     return ast.Slice(lower=lower, upper=upper, step=None)
 
+
 def none_to_empty(value: Any) -> ast.expr | None:
     expr = coerce_expr(value)
     if isinstance(expr, ast.Constant) and expr.value is None:
         return None
     return expr
+
 
 def unwrap_lazy_expr(value: ast.expr) -> ast.expr:
     if isinstance(value, ast.Lambda):

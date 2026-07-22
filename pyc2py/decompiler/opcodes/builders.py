@@ -1,4 +1,6 @@
 import ast
+from typing import cast
+
 
 def make_sequence(opname: str, values: list[ast.expr]) -> ast.expr:
     if opname == "BUILD_TUPLE":
@@ -11,8 +13,11 @@ def make_sequence(opname: str, values: list[ast.expr]) -> ast.expr:
         return ast.Set(elts=values)
     raise ValueError(f"unsupported sequence builder: {opname}")
 
+
 def make_unpacked_sequence(opname: str, values: list[ast.expr]) -> ast.expr:
-    items = [ast.Starred(value=value, ctx=ast.Load()) for value in values]
+    items: list[ast.expr] = [
+        ast.Starred(value=value, ctx=ast.Load()) for value in values
+    ]
     if opname in {"BUILD_TUPLE_UNPACK", "BUILD_TUPLE_UNPACK_WITH_CALL"}:
         return ast.Tuple(elts=items, ctx=ast.Load())
 
@@ -23,11 +28,15 @@ def make_unpacked_sequence(opname: str, values: list[ast.expr]) -> ast.expr:
         return ast.Set(elts=items)
     raise ValueError(f"unsupported unpack sequence builder: {opname}")
 
+
 def make_unpack_map(values: list[ast.expr]) -> ast.Dict:
     return ast.Dict(keys=[None for _value in values], values=values)
 
+
 def make_map_from_stack_items(values: list[ast.expr]) -> ast.Dict:
-    return ast.Dict(keys=values[0::2], values=values[1::2])
+    keys = cast(list[ast.expr | None], values[0::2])
+    return ast.Dict(keys=keys, values=values[1::2])
+
 
 def make_const_key_map(
     keys: ast.expr, values: list[ast.expr], count: int
@@ -36,6 +45,7 @@ def make_const_key_map(
         return None
     return ast.Dict(keys=list(keys.elts), values=values)
 
+
 def iterable_to_literal_items(iterable: ast.expr) -> list[ast.expr]:
     if isinstance(iterable, (ast.List, ast.Set, ast.Tuple)):
         return list(iterable.elts)
@@ -43,6 +53,7 @@ def iterable_to_literal_items(iterable: ast.expr) -> list[ast.expr]:
     if isinstance(iterable, ast.Constant) and isinstance(iterable.value, tuple):
         return [ast.Constant(value=item) for item in iterable.value]
     return [ast.Starred(value=iterable, ctx=ast.Load())]
+
 
 def append_to_container(
     container: ast.expr,
@@ -65,6 +76,7 @@ def append_to_container(
         )
     )
 
+
 def map_add_to_container(
     container: ast.expr,
     key: ast.expr,
@@ -77,6 +89,7 @@ def map_add_to_container(
 
     target = ast.Subscript(value=container, slice=key, ctx=ast.Store())
     return ast.Assign(targets=[target], value=value)
+
 
 def extend_container_literal(
     opname: str, container: ast.expr, iterable: ast.expr
@@ -100,12 +113,15 @@ def extend_container_literal(
         )
     )
 
+
 def update_dict_literal_or_statement(
     container: ast.expr,
     mapping: ast.expr,
 ) -> ast.stmt | None:
     if isinstance(container, ast.Dict):
-        if isinstance(mapping, ast.Dict) and all(key is not None for key in mapping.keys):
+        if isinstance(mapping, ast.Dict) and all(
+            key is not None for key in mapping.keys
+        ):
             container.keys.extend(mapping.keys)
             container.values.extend(mapping.values)
             return None

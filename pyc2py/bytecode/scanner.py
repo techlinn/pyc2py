@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from typing import Any
 
+
 @dataclass(frozen=True, slots=True)
 class DecodedOpcode:
     offset: int
@@ -9,12 +10,14 @@ class DecodedOpcode:
     arg: int | None
     next_offset: int
 
+
 def scan_code(
     code: bytes, opcode_table: Any, version: tuple[int, ...]
 ) -> list[DecodedOpcode]:
     if version >= (3, 6):
         return scan_wordcode(code, opcode_table, version)
     return scan_bytecode(code, opcode_table)
+
 
 def scan_wordcode(
     code: bytes,
@@ -43,6 +46,7 @@ def scan_wordcode(
 
     return result
 
+
 def consumes_next_wordcode(opname: str, version: tuple[int, ...]) -> bool:
     return version[:2] == (3, 12) and opname in {
         "LOAD_CONST__LOAD_FAST",
@@ -51,6 +55,7 @@ def consumes_next_wordcode(opname: str, version: tuple[int, ...]) -> bool:
         "STORE_FAST__LOAD_FAST",
         "STORE_FAST__STORE_FAST",
     }
+
 
 def scan_bytecode(code: bytes, opcode_table: Any) -> list[DecodedOpcode]:
     result: list[DecodedOpcode] = []
@@ -79,11 +84,13 @@ def scan_bytecode(code: bytes, opcode_table: Any) -> list[DecodedOpcode]:
         result.append(DecodedOpcode(opcode_offset, opcode, opname, arg, offset))
     raise ValueError("bytecode scan exceeded byte length")
 
+
 def opname_for(opcode_table: Any, opcode: int) -> str:
     opnames = getattr(opcode_table, "opname", ())
     if opcode < len(opnames):
         return str(opnames[opcode])
     return f"<{opcode}>"
+
 
 def has_opcode_argument(opcode_table: Any, opcode: int) -> bool:
     hasarg = getattr(opcode_table, "hasarg", None)

@@ -19,6 +19,7 @@ from pyc2py.decompiler.opcodes.values import (
     make_constant,
 )
 
+
 def dispatch_instruction(decompiler: Any, instruction: Instruction) -> None:
     for handler in DISPATCH_HANDLERS:
         if handler(decompiler, instruction):
@@ -43,6 +44,7 @@ def dispatch_instruction(decompiler: Any, instruction: Instruction) -> None:
         skipped_opcode_message("unsupported", instruction, opname)
     )
 
+
 def skipped_opcode_message(
     kind: str,
     instruction: Instruction,
@@ -60,6 +62,7 @@ def skipped_opcode_message(
         parts.append(f"argrepr={instruction.argrepr}")
     return ": ".join((parts[0], ", ".join(parts[1:])))
 
+
 def dispatch_stack_instruction(decompiler: Any, instruction: Instruction) -> bool:
     opname = normalized_opcode_name(instruction.opname)
     if opname in NO_VALUE_OPS:
@@ -74,6 +77,7 @@ def dispatch_stack_instruction(decompiler: Any, instruction: Instruction) -> boo
         decompiler.rotate_stack(rotation_count(opname))
         return True
     return dispatch_end_for(decompiler, opname)
+
 
 def dispatch_stack_value_instruction(
     decompiler: Any,
@@ -103,6 +107,7 @@ def dispatch_stack_value_instruction(
         return True
     return False
 
+
 def dispatch_end_for(decompiler: Any, opname: str) -> bool:
     if opname != "END_FOR":
         return False
@@ -110,6 +115,7 @@ def dispatch_end_for(decompiler: Any, opname: str) -> bool:
     if decompiler.version is None or decompiler.version < (3, 14):
         decompiler.pop_or_none()
     return True
+
 
 def constant_negative_nan_from_previous_inf(
     decompiler: Any,
@@ -130,6 +136,7 @@ def constant_negative_nan_from_previous_inf(
         return None
     return math.copysign(1.0, previous) < 0
 
+
 def dispatch_name_instruction(decompiler: Any, instruction: Instruction) -> bool:
     opname = normalized_opcode_name(instruction.opname)
     if dispatch_name_load_instruction(decompiler, instruction, opname):
@@ -147,6 +154,7 @@ def dispatch_name_instruction(decompiler: Any, instruction: Instruction) -> bool
         return True
 
     return dispatch_name_store_delete(decompiler, instruction, opname)
+
 
 def dispatch_name_load_instruction(
     decompiler: Any,
@@ -167,6 +175,7 @@ def dispatch_name_load_instruction(
         return True
     return False
 
+
 def dispatch_name_store_delete(
     decompiler: Any,
     instruction: Instruction,
@@ -179,6 +188,7 @@ def dispatch_name_store_delete(
         decompiler.delete_name(str(instruction.argval), opname)
         return True
     return False
+
 
 def dispatch_statement_instruction(decompiler: Any, instruction: Instruction) -> bool:
     opname = normalized_opcode_name(instruction.opname)
@@ -200,6 +210,7 @@ def dispatch_statement_instruction(decompiler: Any, instruction: Instruction) ->
         return True
 
     return False
+
 
 def dispatch_builder_instruction(decompiler: Any, instruction: Instruction) -> bool:
     opname = normalized_opcode_name(instruction.opname)
@@ -225,6 +236,7 @@ def dispatch_builder_instruction(decompiler: Any, instruction: Instruction) -> b
     ):
         return True
     return dispatch_noarg_method(decompiler, opname, BUILDER_NOARG_METHODS)
+
 
 def dispatch_operator_instruction(decompiler: Any, instruction: Instruction) -> bool:
     opname = normalized_opcode_name(instruction.opname)
@@ -252,12 +264,14 @@ def dispatch_operator_instruction(decompiler: Any, instruction: Instruction) -> 
 
     return dispatch_compare_arg_op(decompiler, opname, instruction.arg)
 
+
 def dispatch_binary_op(decompiler: Any, instruction: Instruction) -> None:
     symbol = binary_operator_symbol(instruction)
     if symbol == "[]":
         decompiler.binary_subscript()
         return
     decompiler.binary_op(symbol)
+
 
 def binary_operator_symbol(instruction: Instruction) -> str:
     specialized = specialized_binary_operator_symbol(instruction.opname)
@@ -268,6 +282,7 @@ def binary_operator_symbol(instruction: Instruction) -> str:
     if argrepr in BINARY_OPS or argrepr.endswith("=") or argrepr == "[]":
         return argrepr
     return argrepr
+
 
 def specialized_binary_operator_symbol(opname: str) -> str | None:
     if opname == "BINARY_OP_EXTEND":
@@ -282,13 +297,17 @@ def specialized_binary_operator_symbol(opname: str) -> str | None:
         return "-"
     return None
 
+
 def compare_op_forces_bool(
     instruction: Instruction,
     version: tuple[int, ...] | None,
 ) -> bool:
-    return version is not None and version >= (3, 13) and bool(
-        int(instruction.arg or 0) & 0x10
+    return (
+        version is not None
+        and version >= (3, 13)
+        and bool(int(instruction.arg or 0) & 0x10)
     )
+
 
 def load_global_name(decompiler: Any, instruction: Instruction) -> None:
     pushes_null = (
@@ -300,11 +319,13 @@ def load_global_name(decompiler: Any, instruction: Instruction) -> None:
         decompiler.stack.append(make_name("NULL", ast.Load()))
     load_name(decompiler, instruction.argval)
 
+
 def load_name(decompiler: Any, value: object) -> None:
     if value == "None":
         decompiler.stack.append(ast.Constant(value=None))
         return
     decompiler.stack.append(make_name(str(value), ast.Load()))
+
 
 def dispatch_compare_arg_op(
     decompiler: Any,
@@ -316,6 +337,7 @@ def dispatch_compare_arg_op(
         return False
     decompiler.compare_op(symbols[int(arg == 1)])
     return True
+
 
 def dispatch_format_call_instruction(decompiler: Any, instruction: Instruction) -> bool:
     opname = normalized_opcode_name(instruction.opname)
@@ -339,6 +361,7 @@ def dispatch_format_call_instruction(decompiler: Any, instruction: Instruction) 
         return True
 
     return False
+
 
 def dispatch_import_attr_instruction(decompiler: Any, instruction: Instruction) -> bool:
     opname = normalized_opcode_name(instruction.opname)
@@ -369,6 +392,7 @@ def dispatch_import_attr_instruction(decompiler: Any, instruction: Instruction) 
 
     return False
 
+
 def dispatch_subscript_instruction(decompiler: Any, instruction: Instruction) -> bool:
     opname = normalized_opcode_name(instruction.opname)
     if dispatch_noarg_method(decompiler, opname, SUBSCRIPT_NOARG_METHODS):
@@ -386,6 +410,7 @@ def dispatch_subscript_instruction(decompiler: Any, instruction: Instruction) ->
 
     return False
 
+
 def dispatch_async_yield_print_instruction(
     decompiler: Any,
     instruction: Instruction,
@@ -402,6 +427,7 @@ def dispatch_async_yield_print_instruction(
 
     return opname == "ASYNC_GEN_WRAP"
 
+
 def dispatch_noarg_method(
     decompiler: Any,
     opname: str,
@@ -412,6 +438,7 @@ def dispatch_noarg_method(
         return False
     getattr(decompiler, method_name)()
     return True
+
 
 def dispatch_str_arg_method(
     decompiler: Any,
@@ -425,6 +452,7 @@ def dispatch_str_arg_method(
     getattr(decompiler, method_name)(str(value))
     return True
 
+
 def dispatch_int_arg_method(
     decompiler: Any,
     opname: str,
@@ -436,8 +464,9 @@ def dispatch_int_arg_method(
     method_name = methods.get(opname)
     if method_name is None:
         return False
-    getattr(decompiler, method_name)(int(value or default))
+    getattr(decompiler, method_name)(read_int_arg(value, default))
     return True
+
 
 def dispatch_opname_int_arg_method(
     decompiler: Any,
@@ -448,8 +477,19 @@ def dispatch_opname_int_arg_method(
     method_name = methods.get(opname)
     if method_name is None:
         return False
-    getattr(decompiler, method_name)(opname, int(value or 0))
+    getattr(decompiler, method_name)(opname, read_int_arg(value, 0))
     return True
+
+
+def read_int_arg(value: object, default: int) -> int:
+    if value is None:
+        return default
+    if not isinstance(value, int):
+        raise TypeError(
+            f"opcode argument must be an integer, got {type(value).__name__}"
+        )
+    return value
+
 
 def dispatch_value_arg_method(
     decompiler: Any,
@@ -463,6 +503,7 @@ def dispatch_value_arg_method(
     getattr(decompiler, method_name)(value)
     return True
 
+
 def dispatch_instruction_method(
     decompiler: Any,
     opname: str,
@@ -475,6 +516,7 @@ def dispatch_instruction_method(
     getattr(decompiler, method_name)(instruction)
     return True
 
+
 def dispatch_opname_prefix_method(
     decompiler: Any,
     opname: str,
@@ -486,6 +528,7 @@ def dispatch_opname_prefix_method(
             return True
     return False
 
+
 def dispatch_statement_node(
     decompiler: Any,
     opname: str,
@@ -496,6 +539,7 @@ def dispatch_statement_node(
         return False
     decompiler.statements.append(node_type())
     return True
+
 
 def super_attr_arg_from_instruction(instruction: Instruction) -> int:
     arg = int(instruction.arg or 0)
@@ -512,11 +556,13 @@ def super_attr_arg_from_instruction(instruction: Instruction) -> int:
 
     return arg
 
+
 def load_attr_arg_from_instruction(instruction: Instruction) -> int:
     arg = int(instruction.arg or 0)
     if instruction.opname.startswith("LOAD_ATTR_METHOD_"):
         return arg | 1
     return arg
+
 
 CALL_OPS = frozenset(
     {

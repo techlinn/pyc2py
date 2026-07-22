@@ -4,11 +4,13 @@ from dataclasses import dataclass
 
 from pyc2py.bytecode.instruction import Instruction
 from pyc2py.bytecode.metadata import ExceptionTableEntry, parse_exception_table
+from pyc2py.decompiler.context import DecompilerContext
 from pyc2py.decompiler.opcodes.flow import (
     is_jump_op,
     is_terminal_op,
     terminal_tail_end_index,
 )
+
 
 @dataclass(frozen=True, slots=True)
 class TryExceptPattern:
@@ -21,6 +23,7 @@ class TryExceptPattern:
     after_index: int
     name: str | None = None
 
+
 @dataclass(frozen=True, slots=True)
 class LegacyTryExceptShape:
     body_start_index: int
@@ -29,6 +32,7 @@ class LegacyTryExceptShape:
     after_index: int
     after_offset: int
 
+
 @dataclass(frozen=True, slots=True)
 class TryFinallyPattern:
     body_start_index: int
@@ -36,6 +40,7 @@ class TryFinallyPattern:
     final_start_index: int
     final_end_index: int
     after_index: int
+
 
 @dataclass(frozen=True, slots=True)
 class SimpleHandler:
@@ -46,11 +51,13 @@ class SimpleHandler:
     name: str | None = None
     miss_index: int | None = None
 
+
 @dataclass(frozen=True, slots=True)
 class LegacyExceptionMatch:
     exception_type_index: int
     miss_jump_index: int
     miss_index: int
+
 
 @dataclass(frozen=True, slots=True)
 class ExceptionTableHandlerMatch:
@@ -59,11 +66,13 @@ class ExceptionTableHandlerMatch:
     miss_jump_index: int
     miss_index: int
 
+
 @dataclass(frozen=True, slots=True)
 class CommonTrailingBody:
     start_index: int
     end_index: int
     length: int
+
 
 @dataclass(frozen=True, slots=True)
 class ExceptionTableExceptPattern:
@@ -79,6 +88,7 @@ class ExceptionTableExceptPattern:
     trailing_start_index: int | None = None
     trailing_end_index: int | None = None
 
+
 @dataclass(frozen=True, slots=True)
 class ExceptionTableExceptStarPattern:
     body_start_index: int
@@ -87,6 +97,7 @@ class ExceptionTableExceptStarPattern:
     after_index: int
     trailing_start_index: int | None = None
     trailing_end_index: int | None = None
+
 
 @dataclass(frozen=True, slots=True)
 class ExceptionTableFinallyPattern:
@@ -97,6 +108,7 @@ class ExceptionTableFinallyPattern:
     after_index: int
     returns_protected_value: bool = False
 
+
 @dataclass(frozen=True, slots=True)
 class ExceptionTableRegion:
     entry: ExceptionTableEntry
@@ -104,22 +116,26 @@ class ExceptionTableRegion:
     body_end_index: int
     handler_start_index: int
 
+
 @dataclass(frozen=True, slots=True)
 class FinallyBodyRange:
     final_start_index: int
     final_end_index: int
     handler_final_end_index: int
 
+
 @dataclass(frozen=True, slots=True)
 class ExceptFinallyRange:
     final_start_index: int
     final_end_index: int
+
 
 @dataclass(frozen=True, slots=True)
 class ReturningExceptFinallyRange:
     final_start_index: int
     final_end_index: int
     handler_end_index: int
+
 
 @dataclass(frozen=True, slots=True)
 class ExceptionTableExceptFinallyPattern:
@@ -135,8 +151,9 @@ class ExceptionTableExceptFinallyPattern:
     name: str | None = None
     returns_protected_values: bool = False
 
+
 def try_translate_exception_table_except(
-    decompiler,
+    decompiler: DecompilerContext,
     instructions: list[Instruction],
     offset_to_index: dict[int, int],
     cursor: int,
@@ -206,8 +223,9 @@ def try_translate_exception_table_except(
     decompiler.statements.extend(trailing_body)
     return pattern.after_index
 
+
 def protected_cleanup_return_statement(
-    decompiler,
+    decompiler: DecompilerContext,
     instructions: list[Instruction],
     pattern: ExceptionTableExceptPattern,
 ) -> ast.Return | None:
@@ -227,6 +245,7 @@ def protected_cleanup_return_statement(
         return None
 
     return ast.Return(value=value)
+
 
 def has_cleanup_return_suffix(
     instructions: list[Instruction],
@@ -251,8 +270,9 @@ def has_cleanup_return_suffix(
         and instructions[cursor].opname == "RETURN_VALUE"
     )
 
+
 def try_translate_exception_table_finally(
-    decompiler,
+    decompiler: DecompilerContext,
     instructions: list[Instruction],
     offset_to_index: dict[int, int],
     cursor: int,
@@ -291,8 +311,9 @@ def try_translate_exception_table_finally(
     )
     return pattern.after_index
 
+
 def wrap_suppressed_finally_cleanup(
-    decompiler,
+    decompiler: DecompilerContext,
     instructions: list[Instruction],
     offset_to_index: dict[int, int],
     pattern: ExceptionTableFinallyPattern,
@@ -325,6 +346,7 @@ def wrap_suppressed_finally_cleanup(
         )
     ]
 
+
 def find_suppressed_finally_cleanup_handler(
     code: object,
     instructions: list[Instruction],
@@ -340,11 +362,7 @@ def find_suppressed_finally_cleanup_handler(
         start_index = offset_to_index.get(entry.start_offset)
         end_index = offset_to_index.get(entry.end_offset)
         handler_start_index = offset_to_index.get(entry.target_offset)
-        if (
-            start_index is None
-            or end_index is None
-            or handler_start_index is None
-        ):
+        if start_index is None or end_index is None or handler_start_index is None:
             continue
         if start_index < final_start_index or start_index >= final_end_index:
             continue
@@ -358,6 +376,7 @@ def find_suppressed_finally_cleanup_handler(
             return handler_start_index
 
     return None
+
 
 def is_suppressed_exception_return_handler(
     instructions: list[Instruction],
@@ -406,7 +425,9 @@ def is_suppressed_exception_return_handler(
         end_index,
     )
 
+
 ExceptionInstructionPredicate = Callable[[Instruction], bool]
+
 
 def read_exception_opcode_index(
     instructions: list[Instruction],
@@ -419,8 +440,10 @@ def read_exception_opcode_index(
         return None
     return cursor
 
+
 def is_exception_false_jump(instruction: Instruction) -> bool:
     return "POP_JUMP" in instruction.opname and "IF_FALSE" in instruction.opname
+
 
 def has_suppressed_exception_return_tail(
     instructions: list[Instruction],
@@ -435,24 +458,26 @@ def has_suppressed_exception_return_tail(
     )
     cursor = start_index
     for predicate in required:
-        cursor = read_exception_opcode_index(
+        opcode_index = read_exception_opcode_index(
             instructions,
             cursor,
             end_index,
             predicate,
         )
-        if cursor is None:
+        if opcode_index is None:
             return False
-        cursor += 1
+        cursor = opcode_index + 1
     return True
+
 
 def is_exception_load(instruction: Instruction) -> bool:
     return instruction.opname in {"LOAD_GLOBAL", "LOAD_NAME"} and (
         instruction.argval == "Exception"
     )
 
+
 def try_translate_exception_table_except_finally(
-    decompiler,
+    decompiler: DecompilerContext,
     instructions: list[Instruction],
     offset_to_index: dict[int, int],
     cursor: int,
@@ -468,6 +493,8 @@ def try_translate_exception_table_except_finally(
     if pattern is None:
         return None
 
+    body: list[ast.stmt]
+    handler_body: list[ast.stmt]
     if pattern.returns_protected_values:
         body = [
             ast.Return(
@@ -531,8 +558,9 @@ def try_translate_exception_table_except_finally(
     )
     return pattern.after_index
 
+
 def exception_table_finally_body(
-    decompiler,
+    decompiler: DecompilerContext,
     instructions: list[Instruction],
     pattern: ExceptionTableFinallyPattern,
 ) -> list[ast.stmt]:
@@ -550,8 +578,9 @@ def exception_table_finally_body(
         pattern.body_end_index,
     )
 
+
 def try_translate_exception_table_except_star(
-    decompiler,
+    decompiler: DecompilerContext,
     instructions: list[Instruction],
     offset_to_index: dict[int, int],
     cursor: int,
@@ -589,8 +618,11 @@ def try_translate_exception_table_except_star(
         )
         for handler in pattern.handlers
     ]
+    try_star = getattr(ast, "TryStar", None)
+    if try_star is None:
+        raise RuntimeError("exception groups require Python 3.11 or newer")
     decompiler.statements.append(
-        ast.TryStar(
+        try_star(
             body=body or [ast.Pass()],
             handlers=handlers,
             orelse=[],
@@ -607,8 +639,9 @@ def try_translate_exception_table_except_star(
         )
     return pattern.after_index
 
+
 def try_translate_except(
-    decompiler,
+    decompiler: DecompilerContext,
     instructions: list[Instruction],
     offset_to_index: dict[int, int],
     cursor: int,
@@ -651,6 +684,7 @@ def try_translate_except(
         )
     )
     return pattern.after_index
+
 
 def find_exception_table_except_pattern(
     code: object,
@@ -741,6 +775,7 @@ def find_exception_table_except_pattern(
         trailing_end_index=trailing_end_index,
     )
 
+
 def read_exception_table_region(
     code: object,
     instructions: list[Instruction],
@@ -780,6 +815,7 @@ def read_exception_table_region(
         handler_start_index=handler_start_index,
     )
 
+
 def read_exception_table_body_end_index(
     code: object,
     offset_to_index: dict[int, int],
@@ -796,6 +832,7 @@ def read_exception_table_body_end_index(
         )
     return offset_to_index.get(entry.end_offset)
 
+
 def is_exception_table_fallthrough_body(
     instructions: list[Instruction],
     body_end_index: int,
@@ -807,6 +844,7 @@ def is_exception_table_fallthrough_body(
     if is_jump_op(instruction.opname) or is_terminal_op(instruction.opname):
         return False
     return instruction.opname != "POP_EXCEPT"
+
 
 def find_exception_table_success_jump_before_handler(
     instructions: list[Instruction],
@@ -825,6 +863,7 @@ def find_exception_table_success_jump_before_handler(
         if target_index is not None and target_index > handler_start_index:
             return index
     return None
+
 
 def find_exception_table_finally_pattern(
     code: object,
@@ -863,9 +902,7 @@ def find_exception_table_finally_pattern(
         region.handler_start_index,
     )
     after_index = (
-        cleanup_after_index
-        if returns_protected_value
-        else final_range.final_end_index
+        cleanup_after_index if returns_protected_value else final_range.final_end_index
     )
 
     return ExceptionTableFinallyPattern(
@@ -876,6 +913,7 @@ def find_exception_table_finally_pattern(
         after_index=after_index,
         returns_protected_value=returns_protected_value,
     )
+
 
 def read_exception_table_finally_body_range(
     instructions: list[Instruction],
@@ -893,11 +931,14 @@ def read_exception_table_finally_body_range(
     )
     if handler_final_end_index is None:
         return None
-    if find_check_exception_match(
-        instructions,
-        handler_final_start_index,
-        handler_final_end_index,
-    ) is not None:
+    if (
+        find_check_exception_match(
+            instructions,
+            handler_final_start_index,
+            handler_final_end_index,
+        )
+        is not None
+    ):
         return None
 
     final_start_index = region.body_end_index
@@ -915,6 +956,7 @@ def read_exception_table_finally_body_range(
         handler_final_end_index=handler_final_end_index,
     )
 
+
 def is_valid_finally_region_start(
     instructions: list[Instruction],
     region: ExceptionTableRegion,
@@ -931,6 +973,7 @@ def is_valid_finally_region_start(
     if region.handler_start_index >= end_index:
         return False
     return instructions[region.handler_start_index].opname == "PUSH_EXC_INFO"
+
 
 def find_exception_table_except_finally_pattern(
     code: object,
@@ -980,6 +1023,7 @@ def find_exception_table_except_finally_pattern(
         name=except_pattern.name,
     )
 
+
 def read_exception_table_except_finally_range(
     code: object,
     instructions: list[Instruction],
@@ -1020,6 +1064,7 @@ def read_exception_table_except_finally_range(
 
     return ExceptFinallyRange(final_start_index, final_end_index)
 
+
 def find_exception_table_returning_except_finally_pattern(
     code: object,
     instructions: list[Instruction],
@@ -1048,6 +1093,7 @@ def find_exception_table_returning_except_finally_pattern(
         name=except_pattern.name,
         returns_protected_values=True,
     )
+
 
 def read_returning_except_finally_range(
     code: object,
@@ -1086,6 +1132,7 @@ def read_returning_except_finally_range(
         handler_end_index=handler_end_index,
     )
 
+
 def read_returning_finally_trailing_range(
     instructions: list[Instruction],
     except_pattern: ExceptionTableExceptPattern,
@@ -1106,6 +1153,7 @@ def read_returning_finally_trailing_range(
         return None
 
     return final_start_index, final_end_index
+
 
 def has_duplicated_exception_finally_range(
     code: object,
@@ -1134,6 +1182,7 @@ def has_duplicated_exception_finally_range(
         cleanup_end_index,
     )
 
+
 def trim_saved_return_handler_cleanup(
     instructions: list[Instruction],
     start_index: int,
@@ -1146,6 +1195,7 @@ def trim_saved_return_handler_cleanup(
     }:
         cursor -= 1
     return cursor
+
 
 def skip_finally_body_prefix(
     instructions: list[Instruction],
@@ -1160,6 +1210,7 @@ def skip_finally_body_prefix(
         cursor += 1
     return cursor
 
+
 def find_finally_body_end_before_cleanup(
     instructions: list[Instruction],
     start_index: int,
@@ -1169,6 +1220,7 @@ def find_finally_body_end_before_cleanup(
         if is_terminal_op(instructions[index].opname):
             return index
     return None
+
 
 def find_duplicated_exception_finally_range(
     code: object,
@@ -1207,6 +1259,7 @@ def find_duplicated_exception_finally_range(
 
     return None
 
+
 def same_instruction_range_behavior(
     instructions: list[Instruction],
     left_start_index: int,
@@ -1225,6 +1278,7 @@ def same_instruction_range_behavior(
             return False
     return True
 
+
 def has_terminal_instruction(
     instructions: list[Instruction],
     start_index: int,
@@ -1235,6 +1289,7 @@ def has_terminal_instruction(
             return True
     return False
 
+
 def has_jump_instruction(
     instructions: list[Instruction],
     start_index: int,
@@ -1244,6 +1299,7 @@ def has_jump_instruction(
         if is_jump_op(instructions[index].opname):
             return True
     return False
+
 
 def find_reraise_zero(
     instructions: list[Instruction],
@@ -1256,6 +1312,7 @@ def find_reraise_zero(
             return index
     return None
 
+
 def find_finally_exception_cleanup_after(
     instructions: list[Instruction],
     start_index: int,
@@ -1267,6 +1324,7 @@ def find_finally_exception_cleanup_after(
             return index + 1
     return end_index
 
+
 def is_return_after_finally(
     instructions: list[Instruction],
     final_end_index: int,
@@ -1275,6 +1333,7 @@ def is_return_after_finally(
     if final_end_index >= handler_start_index:
         return False
     return instructions[final_end_index].opname == "RETURN_VALUE"
+
 
 def find_exception_table_except_star_pattern(
     code: object,
@@ -1334,6 +1393,7 @@ def find_exception_table_except_star_pattern(
         trailing_end_index=trailing_end_index,
     )
 
+
 def exception_table_body_end_index(
     instructions: list[Instruction],
     body_end_index: int,
@@ -1359,6 +1419,7 @@ def exception_table_body_end_index(
             return body_end_index + 2
     return body_end_index
 
+
 def exception_table_pop_except_body_end(
     instructions: list[Instruction],
     body_end_index: int,
@@ -1376,6 +1437,7 @@ def exception_table_pop_except_body_end(
         if return_instruction.opname == "RETURN_VALUE":
             return next_index + 2
     return body_end_index
+
 
 def find_exception_table_common_trailing_body(
     instructions: list[Instruction],
@@ -1409,6 +1471,7 @@ def find_exception_table_common_trailing_body(
         length=success_length,
     )
 
+
 def same_instruction_behavior(left: Instruction, right: Instruction) -> bool:
     return (
         common_trailing_opcode_name(left.opname)
@@ -1416,10 +1479,12 @@ def same_instruction_behavior(left: Instruction, right: Instruction) -> bool:
         and left.argrepr == right.argrepr
     )
 
+
 def common_trailing_opcode_name(opname: str) -> str:
     if opname == "LOAD_FAST_CHECK":
         return "LOAD_FAST"
     return opname
+
 
 def is_implicit_none_return(
     instructions: list[Instruction],
@@ -1442,6 +1507,7 @@ def is_implicit_none_return(
         and next_instruction.starts_line is None
     )
 
+
 def find_exception_table_entry(
     code: object,
     start_offset: int,
@@ -1457,6 +1523,7 @@ def find_exception_table_entry(
         if match is None or entry.depth < match.depth:
             match = entry
     return match
+
 
 def exception_table_protected_end_index(
     code: object,
@@ -1484,6 +1551,7 @@ def exception_table_protected_end_index(
     if end_index_value is None or end_index_value > end_index:
         return None
     return end_index_value
+
 
 def find_exception_table_after_index(
     code: object,
@@ -1537,6 +1605,7 @@ def find_exception_table_after_index(
         end_index,
     )
 
+
 def find_exception_table_terminal_after_index(
     code: object,
     instructions: list[Instruction],
@@ -1581,6 +1650,7 @@ def find_exception_table_terminal_after_index(
         end_index,
     )
 
+
 def exception_handler_matched_after_index(
     instructions: list[Instruction],
     cleanup_index: int,
@@ -1601,6 +1671,7 @@ def exception_handler_matched_after_index(
             return None
     return None
 
+
 def exception_handler_miss_offset(
     instructions: list[Instruction],
     cleanup_index: int,
@@ -1618,6 +1689,7 @@ def exception_handler_miss_offset(
         return None
     return jump.argval
 
+
 def skip_exception_cleanup_tail(
     instructions: list[Instruction],
     cleanup_index: int,
@@ -1628,6 +1700,7 @@ def skip_exception_cleanup_tail(
             return index + 1
     return None
 
+
 def next_index_at_or_after_offset(
     instructions: list[Instruction],
     offset: int,
@@ -1637,6 +1710,7 @@ def next_index_at_or_after_offset(
         if instructions[index].offset >= offset:
             return index
     return None
+
 
 def read_exception_table_handler(
     instructions: list[Instruction],
@@ -1679,6 +1753,7 @@ def read_exception_table_handler(
         name=name,
     )
 
+
 def read_exception_table_handler_match(
     instructions: list[Instruction],
     offset_to_index: dict[int, int],
@@ -1719,6 +1794,7 @@ def read_exception_table_handler_match(
         miss_index=miss_index,
     )
 
+
 def read_exception_handler_miss_index(
     instructions: list[Instruction],
     offset_to_index: dict[int, int],
@@ -1742,6 +1818,7 @@ def read_exception_handler_miss_index(
         return None
     return miss_index
 
+
 def exception_handler_name(
     instructions: list[Instruction],
     body_start_index: int,
@@ -1756,6 +1833,7 @@ def exception_handler_name(
         return None
     return instruction.argval
 
+
 def find_check_exception_match(
     instructions: list[Instruction],
     start_index: int,
@@ -1765,6 +1843,7 @@ def find_check_exception_match(
         if instructions[index].opname == "CHECK_EXC_MATCH":
             return index
     return None
+
 
 def find_exception_table_handler_body_end(
     instructions: list[Instruction],
@@ -1803,6 +1882,7 @@ def find_exception_table_handler_body_end(
         cursor -= 1
     return cursor + 1
 
+
 def find_named_exception_cleanup_end(
     instructions: list[Instruction],
     body_start_index: int,
@@ -1827,6 +1907,7 @@ def find_named_exception_cleanup_end(
         return returning_end_index
     return cleanup_index
 
+
 def find_exception_handler_success_cleanup(
     instructions: list[Instruction],
     body_start_index: int,
@@ -1843,6 +1924,7 @@ def find_exception_handler_success_cleanup(
             cleanup_index = index
     return cleanup_index
 
+
 def skip_extended_args(
     instructions: list[Instruction],
     cursor: int,
@@ -1851,6 +1933,7 @@ def skip_extended_args(
     while cursor < end_index and instructions[cursor].opname == "EXTENDED_ARG":
         cursor += 1
     return cursor
+
 
 def read_exception_group_handler(
     instructions: list[Instruction],
@@ -1875,6 +1958,7 @@ def read_exception_group_handler(
         exception_type_index,
         end_index,
     )
+
 
 def read_exception_group_handlers(
     instructions: list[Instruction],
@@ -1908,10 +1992,12 @@ def read_exception_group_handlers(
 
     return tuple(handlers)
 
+
 def exception_group_next_handler_cursor(handler: SimpleHandler) -> int:
     if handler.miss_index is not None:
         return handler.miss_index
     return handler.body_end_index
+
 
 def find_next_exception_group_type_start(
     instructions: list[Instruction],
@@ -1932,6 +2018,7 @@ def find_next_exception_group_type_start(
         cursor += 1
     return None
 
+
 def read_exception_group_handler_from_type(
     instructions: list[Instruction],
     offset_to_index: dict[int, int],
@@ -1951,10 +2038,7 @@ def read_exception_group_handler_from_type(
         match_index + 1,
         end_index,
     )
-    if (
-        miss_jump_index < end_index
-        and instructions[miss_jump_index].opname == "COPY"
-    ):
+    if miss_jump_index < end_index and instructions[miss_jump_index].opname == "COPY":
         miss_jump_index = skip_exception_match_prefix(
             instructions,
             miss_jump_index + 1,
@@ -2002,6 +2086,7 @@ def read_exception_group_handler_from_type(
         miss_index=miss_index,
     )
 
+
 def read_exception_group_type_start(
     instructions: list[Instruction],
     start_index: int,
@@ -2016,6 +2101,7 @@ def read_exception_group_type_start(
         return None
     return cursor
 
+
 def find_check_exception_group_match(
     instructions: list[Instruction],
     start_index: int,
@@ -2025,6 +2111,7 @@ def find_check_exception_group_match(
         if instructions[index].opname == "CHECK_EG_MATCH":
             return index
     return None
+
 
 def find_exception_group_handler_body_end(
     instructions: list[Instruction],
@@ -2050,6 +2137,7 @@ def find_exception_group_handler_body_end(
             return index
     return miss_index
 
+
 def find_named_exception_cleanup(
     instructions: list[Instruction],
     body_start_index: int,
@@ -2069,6 +2157,7 @@ def find_named_exception_cleanup(
             return index
     return None
 
+
 def named_exception_cleanup_return_end(
     instructions: list[Instruction],
     cleanup_index: int,
@@ -2082,6 +2171,7 @@ def named_exception_cleanup_return_end(
         if instructions[index].opname in {"RERAISE", "RAISE_VARARGS"}:
             return None
     return None
+
 
 def remove_named_exception_cleanup(
     body: list[ast.stmt],
@@ -2100,6 +2190,7 @@ def remove_named_exception_cleanup(
         cursor += 1
     return cleaned
 
+
 def is_named_exception_cleanup_statement_pair(
     body: list[ast.stmt],
     index: int,
@@ -2112,6 +2203,7 @@ def is_named_exception_cleanup_statement_pair(
         name,
     ) and is_named_exception_delete(body[index + 1], name)
 
+
 def is_named_exception_none_assignment(statement: ast.stmt, name: str) -> bool:
     if not isinstance(statement, ast.Assign):
         return False
@@ -2122,6 +2214,7 @@ def is_named_exception_none_assignment(statement: ast.stmt, name: str) -> bool:
         return False
     return isinstance(statement.value, ast.Constant) and statement.value.value is None
 
+
 def is_named_exception_delete(statement: ast.stmt, name: str) -> bool:
     if not isinstance(statement, ast.Delete):
         return False
@@ -2130,10 +2223,12 @@ def is_named_exception_delete(statement: ast.stmt, name: str) -> bool:
     target = statement.targets[0]
     return isinstance(target, ast.Name) and target.id == name
 
+
 def is_none_load(instruction: Instruction) -> bool:
     return instruction.opname in {"LOAD_CONST", "RETURN_CONST"} and (
         instruction.argval is None
     )
+
 
 def find_exception_group_after_region(
     instructions: list[Instruction],
@@ -2165,6 +2260,7 @@ def find_exception_group_after_region(
         cursor = skip_exception_match_prefix(instructions, cursor + 1, end_index)
     return read_exception_group_after_tail(instructions, cursor, end_index)
 
+
 def find_exception_group_reraise_star_end(
     instructions: list[Instruction],
     start_index: int,
@@ -2183,8 +2279,10 @@ def find_exception_group_reraise_star_end(
         cursor += 1
     return None
 
+
 def is_exception_group_not_none_jump(instruction: Instruction) -> bool:
     return "POP_JUMP" in instruction.opname and "IF_NOT_NONE" in instruction.opname
+
 
 def read_exception_group_after_tail(
     instructions: list[Instruction],
@@ -2212,6 +2310,7 @@ def read_exception_group_after_tail(
         trailing_end_index,
     )
 
+
 def find_exception_group_cleanup_end(
     instructions: list[Instruction],
     start_index: int,
@@ -2223,8 +2322,9 @@ def find_exception_group_cleanup_end(
             cleanup_end = index + 1
     return cleanup_end
 
+
 def try_translate_finally(
-    decompiler,
+    decompiler: DecompilerContext,
     instructions: list[Instruction],
     offset_to_index: dict[int, int],
     cursor: int,
@@ -2253,6 +2353,7 @@ def try_translate_finally(
         )
     )
     return pattern.after_index
+
 
 def find_try_except_pattern(
     instructions: list[Instruction],
@@ -2289,6 +2390,7 @@ def find_try_except_pattern(
         after_index=shape.after_index,
         name=handler.name,
     )
+
 
 def read_legacy_try_except_shape(
     instructions: list[Instruction],
@@ -2335,6 +2437,7 @@ def read_legacy_try_except_shape(
         after_offset=after_offset,
     )
 
+
 def read_legacy_try_except_body_jump(
     instructions: list[Instruction],
     setup_index: int,
@@ -2347,6 +2450,7 @@ def read_legacy_try_except_body_jump(
     if body_jump.opname not in {"JUMP_FORWARD", "JUMP_ABSOLUTE", "JUMP"}:
         return None
     return body_jump_index, int(body_jump.argval)
+
 
 def find_try_finally_pattern(
     instructions: list[Instruction],
@@ -2380,6 +2484,7 @@ def find_try_finally_pattern(
         after_index=final_end_index + 1,
     )
 
+
 def jump_target_index_or_end(
     instructions: list[Instruction],
     offset_to_index: dict[int, int],
@@ -2391,6 +2496,7 @@ def jump_target_index_or_end(
     if instructions and target_offset > instructions[-1].offset:
         return len(instructions)
     return None
+
 
 def read_simple_handler(
     instructions: list[Instruction],
@@ -2418,6 +2524,7 @@ def read_simple_handler(
         after_index,
         after_offset,
     )
+
 
 def read_legacy_exception_match_handler(
     instructions: list[Instruction],
@@ -2464,6 +2571,7 @@ def read_legacy_exception_match_handler(
         name=name,
     )
 
+
 def read_legacy_jump_if_not_exception_match_handler(
     instructions: list[Instruction],
     offset_to_index: dict[int, int],
@@ -2492,6 +2600,7 @@ def read_legacy_jump_if_not_exception_match_handler(
         after_index,
         after_offset,
     )
+
 
 def read_legacy_exception_match(
     instructions: list[Instruction],
@@ -2531,6 +2640,7 @@ def read_legacy_exception_match(
         miss_index=miss_index,
     )
 
+
 def is_legacy_compare_exception_match(
     instructions: list[Instruction],
     compare_index: int,
@@ -2542,6 +2652,7 @@ def is_legacy_compare_exception_match(
     return instruction.opname == "COMPARE_OP" and instruction.argrepr == (
         "exception-match"
     )
+
 
 def read_named_handler_body(
     instructions: list[Instruction],
@@ -2565,6 +2676,7 @@ def read_named_handler_body(
     if body_end_index is None:
         return None
     return body_start_index, body_end_index, name
+
 
 def read_jump_if_not_exception_match_handler(
     instructions: list[Instruction],
@@ -2602,6 +2714,7 @@ def read_jump_if_not_exception_match_handler(
         name=name,
     )
 
+
 def read_bare_handler(
     instructions: list[Instruction],
     handler_start_index: int,
@@ -2631,6 +2744,7 @@ def read_bare_handler(
         body_end_index=body_end_index,
     )
 
+
 def skip_exception_match_prefix(
     instructions: list[Instruction],
     start_index: int,
@@ -2646,18 +2760,20 @@ def skip_exception_match_prefix(
         cursor += 1
     return cursor
 
+
 def skip_exception_stack_pops(
     instructions: list[Instruction],
     start_index: int,
     end_index: int,
 ) -> int:
     cursor = start_index
-    while (
-        cursor < end_index
-        and instructions[cursor].opname in {"POP_EXCEPT", "POP_TOP"}
-    ):
+    while cursor < end_index and instructions[cursor].opname in {
+        "POP_EXCEPT",
+        "POP_TOP",
+    }:
         cursor += 1
     return cursor
+
 
 def find_handler_body_end(
     instructions: list[Instruction],
@@ -2678,6 +2794,7 @@ def find_handler_body_end(
         return miss_index
     return None
 
+
 def find_finally_body_end(
     instructions: list[Instruction],
     start_index: int,
@@ -2687,6 +2804,7 @@ def find_finally_body_end(
         if instructions[index].opname == "POP_BLOCK":
             return index
     return final_start_index
+
 
 def find_end_finally(
     instructions: list[Instruction],

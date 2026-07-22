@@ -2,6 +2,7 @@ import ast
 from typing import Any
 
 from pyc2py.astree import make_name, safe_identifier
+from pyc2py.decompiler.context import DecompilerContext
 from pyc2py.decompiler.opcodes.flow import legacy_slice_mode, make_raise
 from pyc2py.decompiler.opcodes.imports_calls import ImportValue, make_super_attribute
 from pyc2py.decompiler.opcodes.stack_names import is_annotations_name, is_null_sentinel
@@ -32,7 +33,8 @@ from pyc2py.decompiler.runtime import (
 from pyc2py.decompiler.structures import is_yield_expression
 from pyc2py.stack import FastStack
 
-class OpcodeAccessRuntimeMixin:
+
+class OpcodeAccessRuntimeMixin(DecompilerContext):
     def load_attr(self, name: str, arg: int = 0) -> None:
         raw_value = self.pop_or_none()
         if is_null_sentinel(coerce_expr(raw_value)) and self.stack:
@@ -232,7 +234,9 @@ class OpcodeAccessRuntimeMixin:
             return ast.Constant(value=False)
         value = coerce_expr(self.stack[-1])
         self.warnings.append(f"{helper_name} represented as helper call")
-        return ast.Call(func=make_name(helper_name, ast.Load()), args=[value], keywords=[])
+        return ast.Call(
+            func=make_name(helper_name, ast.Load()), args=[value], keywords=[]
+        )
 
     def match_keys(self) -> None:
         if len(self.stack) < 2:
@@ -364,7 +368,7 @@ class OpcodeAccessRuntimeMixin:
     def store_subscript(self) -> None:
         raw_index = self.pop_or_none()
         index = (
-            raw_index if isinstance(raw_index, ast.slice) else coerce_expr(raw_index)
+            raw_index if isinstance(raw_index, ast.Slice) else coerce_expr(raw_index)
         )
         target_value = coerce_expr(self.pop_or_none())
         raw_value = self.pop_or_none()
@@ -385,7 +389,7 @@ class OpcodeAccessRuntimeMixin:
 
     def append_store_statement(self, statement: ast.stmt) -> None:
         if self.pending_simultaneous_store_count > 0:
-            statement._pyc2py_store_group = self.simultaneous_store_group
+            setattr(statement, "_pyc2py_store_group", self.simultaneous_store_group)
             self.pending_simultaneous_store_count -= 1
         self.statements.append(statement)
 
@@ -448,7 +452,7 @@ class OpcodeAccessRuntimeMixin:
     def delete_subscript(self) -> None:
         raw_index = self.pop_or_none()
         index = (
-            raw_index if isinstance(raw_index, ast.slice) else coerce_expr(raw_index)
+            raw_index if isinstance(raw_index, ast.Slice) else coerce_expr(raw_index)
         )
         target_value = coerce_expr(self.pop_or_none())
 
@@ -489,12 +493,14 @@ class OpcodeAccessRuntimeMixin:
     def reraise(self) -> None:
         self.statements.append(make_raise([]))
 
+
 LOAD_SPECIAL_METHOD_NAMES = (
     "__enter__",
     "__exit__",
     "__aenter__",
     "__aexit__",
 )
+
 
 def special_method_name(arg: int) -> str | None:
     if arg < 0 or arg >= len(LOAD_SPECIAL_METHOD_NAMES):

@@ -20,11 +20,7 @@ class ConsoleProgress:
     def __call__(self, message: str) -> None:
         phase = phase_for_message(message)
         if phase != self.current_phase:
-            self.current_phase = phase
-            self.step_number = 0
-            self.clear()
-            print(f"== {phase} ==", flush=True)
-            print("", flush=True)
+            self.start_manual_phase(phase)
 
         self.step_number += 1
         print(f"[{self.step_number:02}] {message}", flush=True)
@@ -34,7 +30,7 @@ class ConsoleProgress:
         self.step_number = 0
         self.clear()
         print(f"== {phase} ==", flush=True)
-        print("", flush=True)
+        print(flush=True)
 
     def print_manual(self, message: str) -> None:
         self.step_number += 1
@@ -76,7 +72,7 @@ def phase_for_message(message: str) -> str:
         return "Phase 4 - Writing output"
     if "validating" in lowered or lowered.startswith("parsing and compiling"):
         return "Phase 5 - Validating result"
-    if lowered.startswith("warning:") or lowered.startswith("error:"):
+    if lowered.startswith(("warning:", "error:")):
         return "Phase 5 - Validating result"
     if "validation passed" in lowered or "validation failed" in lowered:
         return "Phase 5 - Validating result"
@@ -224,7 +220,9 @@ def make_failed_result(path: Path, target: Path, error: Exception) -> DecompileR
     )
 
 
-def print_final_report(results: list[DecompileResult], progress: ConsoleProgress) -> None:
+def print_final_report(
+    results: list[DecompileResult], progress: ConsoleProgress
+) -> None:
     progress.start_manual_phase("Phase 6 - Final report")
     passed = sum(1 for result in results if result.report.passed)
     failed = len(results) - passed
@@ -260,19 +258,19 @@ def print_diagnostics(results: list[DecompileResult]) -> None:
         for error in result.report.errors
     ]
     if not warnings and not errors:
-        print("", flush=True)
+        print(flush=True)
         print("Diagnostics: no warnings or errors.", flush=True)
         return
 
-    print("", flush=True)
+    print(flush=True)
     print("Diagnostics:", flush=True)
     if warnings:
-        print("", flush=True)
+        print(flush=True)
         print("Warnings:", flush=True)
         for path, warning in warnings:
             print(f"- {path}: {warning}", flush=True)
     if errors:
-        print("", flush=True)
+        print(flush=True)
         print("Errors:", flush=True)
         for path, error in errors:
             print(f"- {path}: {error}", flush=True)

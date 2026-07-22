@@ -4,6 +4,7 @@ from typing import Any
 
 from pyc2py.bytecode.instruction import Instruction
 from pyc2py.bytecode.metadata import skip_ignorable_instructions
+from pyc2py.decompiler.context import DecompilerContext
 from pyc2py.decompiler.opcodes.stack_names import NO_VALUE_OPS
 from pyc2py.decompiler.recover import (
     make_dict_comp,
@@ -28,6 +29,7 @@ COMPREHENSION_BUILD_OPS = frozenset(
     }
 )
 
+
 @dataclass(frozen=True, slots=True)
 class InlinedComprehensionShape:
     save_instructions: tuple[Instruction, ...]
@@ -35,6 +37,7 @@ class InlinedComprehensionShape:
     for_iter: Instruction
     for_iter_index: int
     loop_end_index: int
+
 
 @dataclass(frozen=True, slots=True)
 class AsyncInlinedComprehensionShape:
@@ -45,11 +48,13 @@ class AsyncInlinedComprehensionShape:
     body_start_index: int
     loop_end_index: int
 
+
 @dataclass(frozen=True, slots=True)
 class InlinedComprehensionHeader:
     save_instructions: tuple[Instruction, ...]
     build_instruction: Instruction
     cursor: int
+
 
 @dataclass(frozen=True, slots=True)
 class InlinedComprehensionBody:
@@ -57,6 +62,7 @@ class InlinedComprehensionBody:
     body_start: int
     back_jump_index: int
     update_index: int | None
+
 
 def is_valid_inlined_first_swap(
     instruction: Instruction,
@@ -66,7 +72,8 @@ def is_valid_inlined_first_swap(
         return False
     return instruction.arg in {2, save_count + 1}
 
-class ControlComprehensionRecoveryMixin:
+
+class ControlComprehensionRecoveryMixin(DecompilerContext):
     def try_translate_legacy_list_comprehension(
         self,
         instructions: list[Instruction],
@@ -927,6 +934,7 @@ class ControlComprehensionRecoveryMixin:
         body = child.translate_range(instructions, start_index, end_index)
         self.warnings.extend(child.warnings)
         return body
+
 
 def is_empty_list_literal(value: Any) -> bool:
     return isinstance(value, ast.List) and not value.elts

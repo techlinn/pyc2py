@@ -1,9 +1,11 @@
 import ast
 from typing import Any
 
+from pyc2py.decompiler.context import DecompilerContext
 from pyc2py.decompiler.runtime import coerce_expr
 
-class StackRuntimeMixin:
+
+class StackRuntimeMixin(DecompilerContext):
     def duplicate_top(self) -> None:
         if not self.stack:
             self.warnings.append("DUP_TOP on empty stack")

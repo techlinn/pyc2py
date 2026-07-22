@@ -237,7 +237,6 @@ Ignored/generated files include:
 
 ```text
 __pycache__/
-.pytest_cache/
 .ruff_cache/
 .mypy_cache/
 *.pyc
@@ -255,21 +254,3 @@ python -B -c "import ast, pathlib; paths=[pathlib.Path('main.py'), *pathlib.Path
 
 If you run manual `.pyc` smoke tests, remove the generated files before
 committing.
-
-## tests
-
-The test suite is self-generating: it compiles `.py` snippets to `.pyc` in
-memory (and via any other `python3.x` interpreters found on `PATH`), runs the
-full pipeline, and asserts the output compiles and contains no unresolved
-`__pyc2py_*` helper. No `.pyc` binaries are committed.
-
-```bash
-python -m pip install -e ".[dev]"
-ruff check .
-pyflakes pyc2py main.py
-pytest -q
-```
-
-Snippets live in `tests/snippets/`. Known-hard recovery cases are marked
-`xfail`, so fixing one shows up as an unexpected pass instead of silently
-regressing. CI runs the same checks on a Python 3.10–3.13 matrix.

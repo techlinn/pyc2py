@@ -5,21 +5,25 @@ from pyc2py.astree import is_assertion_error_expr as is_assertion_error_call_tar
 from pyc2py.bytecode.decoder import decode_instructions
 from pyc2py.bytecode.instruction import Instruction
 from pyc2py.bytecode.opcode_table import normalized_opcode_name
+from pyc2py.decompiler.context import DecompilerContext
 from pyc2py.decompiler.opcodes.imports_calls import (
     ImportedAttributeValue,
     ImportValue,
     keyword_names_from_value,
     make_call_argument_plan,
     make_import_star_statement,
+)
+from pyc2py.decompiler.opcodes.imports_calls import (
     split_call_arguments as split_call_argument_values,
 )
+from pyc2py.decompiler.opcodes.stack_names import is_null_sentinel
+from pyc2py.decompiler.opcodes.values import is_code_constant
 from pyc2py.decompiler.recover import make_exec_call
 from pyc2py.decompiler.runtime import (
     BuildClassValue,
     ClassValue,
     FunctionValue,
     TypeAliasValue,
-    annotation_dict_from_ast_dict_literal as annotation_dict_from_ast_dict,
     coerce_expr,
     function_annotations_from_code,
     make_class_value,
@@ -27,10 +31,12 @@ from pyc2py.decompiler.runtime import (
     make_lambda_expr,
     unwrap_lazy_expr,
 )
-from pyc2py.decompiler.opcodes.stack_names import is_null_sentinel
-from pyc2py.decompiler.opcodes.values import is_code_constant
+from pyc2py.decompiler.runtime import (
+    annotation_dict_from_ast_dict_literal as annotation_dict_from_ast_dict,
+)
 
-class OpcodeCallRuntimeMixin:
+
+class OpcodeCallRuntimeMixin(DecompilerContext):
     def call_function(self, instruction: Instruction) -> None:
         if self.try_call_assertion_error(instruction):
             return
@@ -100,7 +106,9 @@ class OpcodeCallRuntimeMixin:
                 return False, function, self_argument, raw_arguments
 
             iterable = self.expression_from_stack_value(self_argument)
-            comprehension = make_comprehension_expr(function.code, iterable, self.version)
+            comprehension = make_comprehension_expr(
+                function.code, iterable, self.version
+            )
             if comprehension is not None:
                 self.stack.append(comprehension)
                 return True, function, self_argument, raw_arguments
@@ -190,9 +198,10 @@ class OpcodeCallRuntimeMixin:
         instruction: Instruction | None = None,
     ) -> tuple[Any, Any | None]:
         function = self.pop_or_none()
-        if instruction is not None and call_opcode_name(
-            instruction.opname, self.version
-        ) == "CALL_FUNCTION_EX":
+        if (
+            instruction is not None
+            and call_opcode_name(instruction.opname, self.version) == "CALL_FUNCTION_EX"
+        ):
             return function, None
         if not uses_split_call_target(instruction, self.version):
             return function, None
@@ -209,7 +218,9 @@ class OpcodeCallRuntimeMixin:
         callable_value = self.pop_or_none()
         return callable_value, function
 
-    def evaluate_generic_parameter_function(self, function: FunctionValue) -> Any | None:
+    def evaluate_generic_parameter_function(
+        self, function: FunctionValue
+    ) -> Any | None:
         code_name = str(getattr(function.code, "co_name", ""))
         if not code_name.startswith("<generic parameters of "):
             return None
@@ -402,7 +413,9 @@ class OpcodeCallRuntimeMixin:
         right = self.expression_from_stack_value(raw_right)
         left = self.expression_from_stack_value(raw_left)
         self.warnings.append(f"CALL_INTRINSIC_2 represented as helper call: {name}")
-        self.stack.append(make_intrinsic_call("__pyc2py_intrinsic_2", name, [left, right]))
+        self.stack.append(
+            make_intrinsic_call("__pyc2py_intrinsic_2", name, [left, right])
+        )
 
     def call_intrinsic_2_value(
         self,
@@ -446,7 +459,9 @@ class OpcodeCallRuntimeMixin:
         right = self.expression_from_stack_value(raw_right)
         type_params = type_params_from_value(right)
         if type_params is None or not isinstance(raw_left, FunctionValue):
-            self.warnings.append("INTRINSIC_SET_FUNCTION_TYPE_PARAMS was not recognized")
+            self.warnings.append(
+                "INTRINSIC_SET_FUNCTION_TYPE_PARAMS was not recognized"
+            )
             left = self.expression_from_stack_value(raw_left)
             self.stack.append(
                 make_intrinsic_call("__pyc2py_intrinsic_2", name, [left, right])
@@ -771,10 +786,12 @@ class OpcodeCallRuntimeMixin:
         base_items = tuple(bases.elts) if isinstance(bases, ast.Tuple) else ()
         self.stack.append(ClassValue(code=function.code, bases=base_items))
 
+
 def annotation_dict_from_ast_tuple(value: ast.Tuple) -> dict[str, ast.expr] | None:
     if len(value.elts) % 2 == 0:
         return alternating_annotation_items(value.elts)
     return named_tail_annotation_items(value.elts)
+
 
 def alternating_annotation_items(
     items: list[ast.expr],
@@ -787,6 +804,7 @@ def alternating_annotation_items(
         result[name] = items[index + 1]
     return result
 
+
 def named_tail_annotation_items(
     items: list[ast.expr],
 ) -> dict[str, ast.expr] | None:
@@ -795,6 +813,7 @@ def named_tail_annotation_items(
     if names is None or len(names) != len(annotations):
         return None
     return dict(zip(names, annotations, strict=True))
+
 
 def annotation_names(value: ast.expr) -> tuple[str, ...] | None:
     if not isinstance(value, ast.Tuple):
@@ -808,13 +827,16 @@ def annotation_names(value: ast.expr) -> tuple[str, ...] | None:
         names.append(name)
     return tuple(names)
 
+
 def annotation_name(value: ast.expr) -> str | None:
     if isinstance(value, ast.Constant) and isinstance(value.value, str):
         return value.value
     return None
 
+
 def is_valid_function_decorator(value: ast.expr) -> bool:
     return isinstance(value, (ast.Name, ast.Attribute, ast.Call))
+
 
 def intrinsic_name(instruction: Instruction) -> str:
     if isinstance(instruction.argval, str):
@@ -822,6 +844,7 @@ def intrinsic_name(instruction: Instruction) -> str:
     if instruction.argrepr:
         return str(instruction.argrepr)
     return str(instruction.arg)
+
 
 def call_opcode_name(
     opname: str,
@@ -835,6 +858,7 @@ def call_opcode_name(
     ):
         return "CALL_KW"
     return normalized_opcode_name(opname)
+
 
 def uses_split_call_target(
     instruction: Instruction | None,
@@ -851,6 +875,7 @@ def uses_split_call_target(
         return version is None or version >= (3, 11)
     return False
 
+
 def make_intrinsic_call(
     helper_name: str,
     intrinsic: str,
@@ -862,6 +887,7 @@ def make_intrinsic_call(
         keywords=[],
     )
 
+
 def make_list_to_tuple_value(value: ast.expr) -> ast.expr:
     if isinstance(value, ast.List):
         return ast.Tuple(elts=value.elts, ctx=ast.Load())
@@ -871,6 +897,7 @@ def make_list_to_tuple_value(value: ast.expr) -> ast.expr:
         keywords=[],
     )
 
+
 def make_generic_subscript(value: ast.expr) -> ast.Subscript:
     return ast.Subscript(
         value=ast.Name(id="Generic", ctx=ast.Load()),
@@ -878,11 +905,13 @@ def make_generic_subscript(value: ast.expr) -> ast.Subscript:
         ctx=ast.Load(),
     )
 
+
 INTRINSIC_TYPING_CONSTRUCTORS = {
     "INTRINSIC_TYPEVAR": "TypeVar",
     "INTRINSIC_PARAMSPEC": "ParamSpec",
     "INTRINSIC_TYPEVARTUPLE": "TypeVarTuple",
 }
+
 
 def make_typing_constructor_call(name: str, arguments: list[ast.expr]) -> ast.Call:
     return ast.Call(
@@ -890,6 +919,7 @@ def make_typing_constructor_call(name: str, arguments: list[ast.expr]) -> ast.Ca
         args=arguments,
         keywords=[],
     )
+
 
 def make_typevar_constraints_call(name: ast.expr, constraints: ast.expr) -> ast.Call:
     arguments = [name]
@@ -902,6 +932,7 @@ def make_typevar_constraints_call(name: ast.expr, constraints: ast.expr) -> ast.
         args=arguments,
         keywords=[],
     )
+
 
 def make_typeparam_default_call(value: ast.expr, default: ast.expr) -> ast.Call | None:
     if not isinstance(value, ast.Call):
@@ -919,6 +950,7 @@ def make_typeparam_default_call(value: ast.expr, default: ast.expr) -> ast.Call 
         ],
     )
 
+
 def class_value_with_generic_type_params(
     value: ClassValue,
     statements: list[ast.stmt],
@@ -933,6 +965,7 @@ def class_value_with_generic_type_params(
         type_params=type_params,
     )
 
+
 def generic_type_params_from_statements(
     statements: list[ast.stmt],
 ) -> tuple[ast.expr, ...]:
@@ -942,9 +975,12 @@ def generic_type_params_from_statements(
         if not isinstance(statement.value, ast.Tuple):
             continue
         type_params = tuple(statement.value.elts)
-        if type_params and all(is_typing_constructor_call(param) for param in type_params):
+        if type_params and all(
+            is_typing_constructor_call(param) for param in type_params
+        ):
             return type_params
     return ()
+
 
 def is_typing_constructor_call(value: ast.expr) -> bool:
     return (
@@ -952,6 +988,7 @@ def is_typing_constructor_call(value: ast.expr) -> bool:
         and isinstance(value.func, ast.Name)
         and value.func.id in {"TypeVar", "ParamSpec", "TypeVarTuple"}
     )
+
 
 def generic_class_bases_without_synthetic_base(
     bases: tuple[ast.expr, ...],
@@ -962,12 +999,14 @@ def generic_class_bases_without_synthetic_base(
         if not (isinstance(base, ast.Name) and base.id == "value")
     )
 
+
 def type_params_from_value(value: ast.expr) -> tuple[ast.expr, ...] | None:
     if isinstance(value, ast.Tuple):
         return tuple(value.elts)
     if isinstance(value, ast.List):
         return tuple(value.elts)
     return None
+
 
 def make_type_alias_call(value: ast.expr) -> ast.Call | None:
     if not isinstance(value, ast.Tuple) or len(value.elts) != 3:
@@ -979,6 +1018,7 @@ def make_type_alias_call(value: ast.expr) -> ast.Call | None:
         args=[name, alias_value],
         keywords=[ast.keyword(arg="type_params", value=type_params)],
     )
+
 
 def make_type_alias_value(value: ast.expr) -> TypeAliasValue | None:
     if not isinstance(value, ast.Tuple) or len(value.elts) != 3:
@@ -998,12 +1038,14 @@ def make_type_alias_value(value: ast.expr) -> TypeAliasValue | None:
         type_params=type_alias_type_params(type_params),
     )
 
+
 def type_alias_expr(value: ast.expr) -> ast.expr | None:
     if isinstance(value, ast.Lambda):
         return value.body
     if isinstance(value, ast.Constant) and value.value is None:
         return None
     return value
+
 
 def type_alias_type_params(value: ast.expr) -> tuple[ast.expr, ...]:
     if isinstance(value, ast.Tuple):

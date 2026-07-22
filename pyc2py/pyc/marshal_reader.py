@@ -3,9 +3,9 @@ from typing import Any
 from pyc2py.pyc.code import PycCode
 from pyc2py.pyc.marshal_code_reader import MarshalCodeReaderMixin
 from pyc2py.pyc.objects import (
+    NULL_OBJECT,
     FrozenDictValue,
     LegacyLong,
-    NULL_OBJECT,
     read_dict,
     read_frozen_dict,
     read_list,
@@ -53,6 +53,7 @@ RECURSIVE_PAYLOAD_METHODS = {
     TYPE_CODE_LEGACY: "read_code_ancient_compact",
     ord("c"): "read_code",
 }
+
 
 class MarshalReader(MarshalCodeReaderMixin):
     def __init__(self, data: bytes, version: tuple[int, ...]) -> None:
@@ -172,6 +173,7 @@ class MarshalReader(MarshalCodeReaderMixin):
         has_ref: bool,
     ) -> tuple[Any, int]:
         reserved = self.refs.reserve(has_ref)
+        value: Any
 
         if type_code == ord("("):
             value, offset = read_tuple(self, self.data, offset, depth)
@@ -209,6 +211,7 @@ class MarshalReader(MarshalCodeReaderMixin):
         reserved = self.refs.reserve(has_ref)
         value, offset = read_frozen_dict(self, offset, depth)
         return self.refs.set_reserved(reserved, value), offset
+
 
 def load_marshal_code(data: bytes, version: tuple[int, ...]) -> PycCode:
     reader = MarshalReader(data, version)

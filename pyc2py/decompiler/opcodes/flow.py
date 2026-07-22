@@ -7,13 +7,16 @@ TERMINAL_OPS = frozenset(
     {"INTERPRETER_EXIT", "RETURN_CONST", "RETURN_VALUE", "RAISE_VARARGS", "RERAISE"}
 )
 
+
 def is_jump_op(opname: str) -> bool:
     opname = normalized_opcode_name(opname)
     return "JUMP" in opname or opname in {"FOR_ITER", "SEND"}
 
+
 def is_terminal_op(opname: str) -> bool:
     opname = normalized_opcode_name(opname)
     return opname in TERMINAL_OPS
+
 
 def terminal_tail_end_index(
     instructions: list[Instruction],
@@ -25,6 +28,7 @@ def terminal_tail_end_index(
             return index + 1
     return None
 
+
 def make_raise(values: list[ast.expr]) -> ast.Raise:
     if not values:
         return ast.Raise(exc=None, cause=None)
@@ -33,10 +37,13 @@ def make_raise(values: list[ast.expr]) -> ast.Raise:
     cause = values[1] if len(values) > 1 else None
     return ast.Raise(exc=exc, cause=cause)
 
+
 LEGACY_SLICE_PREFIXES = ("SLICE+", "STORE_SLICE+", "DELETE_SLICE+")
+
 
 def is_legacy_slice_op(opname: str) -> bool:
     return opname.startswith(LEGACY_SLICE_PREFIXES)
+
 
 def legacy_slice_mode(opname: str) -> str:
     if not is_legacy_slice_op(opname):

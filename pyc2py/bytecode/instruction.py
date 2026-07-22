@@ -10,6 +10,7 @@ IGNORED_BEHAVIOR_OPNAMES = frozenset(
     }
 )
 
+
 @dataclass(frozen=True, slots=True)
 class Instruction:
     offset: int

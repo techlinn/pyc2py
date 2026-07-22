@@ -1,6 +1,7 @@
 import importlib.util
 import struct
 import sys
+
 from pyc2py.types import VersionTuple
 
 MAGIC_VERSION_MAP: dict[int, VersionTuple] = {
@@ -38,15 +39,19 @@ MAGIC_VERSION_MAP: dict[int, VersionTuple] = {
     3701: (3, 16),
 }
 
+
 def find_known_version(magic_int: int) -> VersionTuple | None:
     return MAGIC_VERSION_MAP.get(magic_int)
 
+
 CURRENT_MAGIC_INT = struct.unpack("<H", importlib.util.MAGIC_NUMBER[:2])[0]
+
 
 def read_magic_int(data: bytes) -> int:
     if len(data) < 2:
         raise ValueError("pyc data is shorter than the magic word")
     return struct.unpack("<H", data[:2])[0]
+
 
 def find_version(magic_int: int) -> tuple[int, ...] | None:
     if magic_int == CURRENT_MAGIC_INT:

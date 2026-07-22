@@ -1,6 +1,8 @@
 from dataclasses import dataclass
+
 from pyc2py.bytecode.instruction import Instruction
 from pyc2py.bytecode.opcode_table import normalized_opcode_name
+
 
 @dataclass(frozen=True, slots=True)
 class BytecodeStackEffect:
@@ -10,6 +12,7 @@ class BytecodeStackEffect:
     @property
     def net(self) -> int:
         return self.pushes - self.pops
+
 
 LOAD_EFFECT = BytecodeStackEffect(pops=0, pushes=1)
 STORE_EFFECT = BytecodeStackEffect(pops=1, pushes=0)
@@ -198,8 +201,10 @@ FIXED_STACK_EFFECTS: dict[str, BytecodeStackEffect] = {
     "DICT_UPDATE": BytecodeStackEffect(pops=1, pushes=0),
 }
 
+
 def fixed_stack_effect(opname: str) -> BytecodeStackEffect | None:
     return FIXED_STACK_EFFECTS.get(opname)
+
 
 def instruction_stack_effect(
     instruction: Instruction,
@@ -226,6 +231,7 @@ def instruction_stack_effect(
         return effect
     return fixed_stack_effect(opname)
 
+
 def stack_effect_opname(
     opname: str,
     version: tuple[int, ...] | None = None,
@@ -240,6 +246,7 @@ def stack_effect_opname(
     ):
         return "CALL_KW"
     return normalized_opcode_name(opname)
+
 
 def attribute_stack_effect(
     opname: str,
@@ -265,21 +272,26 @@ def attribute_stack_effect(
         return BytecodeStackEffect(pops=3, pushes=1 + int(arg & 1))
     return None
 
+
 def load_attr_stack_arg(opname: str, arg: int) -> int:
     if opname.startswith("LOAD_ATTR_METHOD_"):
         return arg | 1
     return arg
+
 
 def load_super_attr_stack_arg(opname: str, arg: int) -> int:
     if opname == "LOAD_SUPER_ATTR_METHOD":
         return arg | 1
     return arg
 
+
 def supports_load_attr_call_shape(version: tuple[int, ...] | None) -> bool:
     return version is None or version >= (3, 12)
 
+
 def supports_load_global_null(version: tuple[int, ...] | None) -> bool:
     return version is None or version >= (3, 11)
+
 
 def versioned_stack_effect(
     opname: str,
@@ -293,10 +305,12 @@ def versioned_stack_effect(
 
     return None
 
+
 def jump_stack_effect(opname: str) -> BytecodeStackEffect | None:
     if opname.startswith("POP_JUMP"):
         return BytecodeStackEffect(pops=1, pushes=0)
     return None
+
 
 BUILD_ARG_EFFECT_OPS = {
     "BUILD_LIST",
@@ -310,6 +324,7 @@ BUILD_ARG_EFFECT_OPS = {
     "BUILD_TUPLE_UNPACK",
     "BUILD_TUPLE_UNPACK_WITH_CALL",
 }
+
 
 def builder_stack_effect(opname: str, arg: int) -> BytecodeStackEffect | None:
     pops: int | None = None
@@ -330,10 +345,12 @@ def builder_stack_effect(opname: str, arg: int) -> BytecodeStackEffect | None:
         return None
     return BytecodeStackEffect(pops=pops, pushes=1)
 
+
 def format_stack_effect(opname: str, arg: int) -> BytecodeStackEffect | None:
     if opname == "FORMAT_VALUE":
         return BytecodeStackEffect(pops=1 + int(bool(arg & 0x04)), pushes=1)
     return None
+
 
 def unpack_stack_effect(opname: str, arg: int) -> BytecodeStackEffect | None:
     if opname == "UNPACK_SEQUENCE_TWO_TUPLE":
@@ -347,6 +364,7 @@ def unpack_stack_effect(opname: str, arg: int) -> BytecodeStackEffect | None:
         after_count = (arg >> 8) & 0xFF
         return BytecodeStackEffect(pops=1, pushes=before_count + after_count + 1)
     return None
+
 
 def call_stack_effect(
     opname: str,
@@ -373,6 +391,7 @@ def call_stack_effect(
         return None
     return BytecodeStackEffect(pops=pops, pushes=1)
 
+
 def exception_stack_effect(opname: str, arg: int) -> BytecodeStackEffect | None:
     if opname == "RAISE_VARARGS":
         return BytecodeStackEffect(pops=max(0, arg), pushes=0)
@@ -382,6 +401,7 @@ def exception_stack_effect(opname: str, arg: int) -> BytecodeStackEffect | None:
 
     return None
 
+
 STACK_EFFECT_READERS = (
     builder_stack_effect,
     format_stack_effect,
@@ -389,10 +409,12 @@ STACK_EFFECT_READERS = (
     exception_stack_effect,
 )
 
+
 def build_slice_effect(arg: int) -> BytecodeStackEffect | None:
     if arg not in {2, 3}:
         return None
     return BytecodeStackEffect(pops=arg, pushes=1)
+
 
 def legacy_call_effect(arg: int, opname: str) -> BytecodeStackEffect:
     positional_count = arg & 0xFF
@@ -402,6 +424,7 @@ def legacy_call_effect(arg: int, opname: str) -> BytecodeStackEffect:
         pops=positional_count + keyword_count * 2 + star_count + 1,
         pushes=1,
     )
+
 
 def make_function_extra_operand_count(flags: int) -> int:
     operand_flags = flags & 0x0F

@@ -7,16 +7,20 @@ from typing import Any
 
 from pyc2py.pyc.objects import MarshalSetValue
 
+
 def safe_identifier(name: str, default_name: str = "value") -> str:
     if name.isidentifier() and not keyword.iskeyword(name):
         return name
     return default_name
 
+
 def make_name(name: str, ctx: ast.expr_context | None = None) -> ast.Name:
     return ast.Name(id=safe_identifier(name), ctx=ctx or ast.Load())
 
+
 def make_arg(name: object) -> ast.arg:
     return ast.arg(arg=safe_identifier(str(name), default_name="arg"), annotation=None)
+
 
 def make_constant(value: Any) -> ast.expr:
     if isinstance(value, int) and not isinstance(value, bool):
@@ -33,17 +37,21 @@ def make_constant(value: Any) -> ast.expr:
         )
     return ast.Constant(value=value)
 
+
 def constant_sort_key(value: Any) -> tuple[str, str]:
     return type(value).__name__, repr(value)
 
+
 def is_none_constant(value: ast.expr) -> bool:
     return isinstance(value, ast.Constant) and value.value is None
+
 
 def is_docstring_statement(statement: ast.stmt) -> bool:
     if not isinstance(statement, ast.Expr):
         return False
     value = statement.value
     return isinstance(value, ast.Constant) and isinstance(value.value, str)
+
 
 def walk_bounded(root: ast.AST, max_nodes: int = 100_000) -> Iterator[ast.AST]:
     if max_nodes < 1:
@@ -57,6 +65,7 @@ def walk_bounded(root: ast.AST, max_nodes: int = 100_000) -> Iterator[ast.AST]:
         yield node
         work.extend(reversed(list(ast.iter_child_nodes(node))))
     raise ValueError("AST walk exceeded max_nodes")
+
 
 @dataclass(frozen=True, slots=True)
 class ASTShape:
@@ -73,6 +82,7 @@ class ASTShape:
             f"source class definitions: {self.class_count}",
             f"source pass-only bodies: {self.pass_only_bodies}",
         )
+
 
 def analyze_ast_shape(root: ast.AST, max_nodes: int = 100_000) -> ASTShape:
     module_statements = len(root.body) if isinstance(root, ast.Module) else 0
@@ -97,10 +107,12 @@ def analyze_ast_shape(root: ast.AST, max_nodes: int = 100_000) -> ASTShape:
         pass_only_bodies=pass_only_bodies,
     )
 
+
 def is_pass_only_body(body: list[ast.stmt]) -> bool:
     if len(body) != 1:
         return False
     return isinstance(body[0], ast.Pass)
+
 
 def clean_decompiled_body(body: list[ast.stmt], is_module: bool) -> list[ast.stmt]:
     result = list(body)
@@ -128,6 +140,7 @@ def clean_decompiled_body(body: list[ast.stmt], is_module: bool) -> list[ast.stm
             return result[:-1]
     return result
 
+
 def remove_module_return_statements(statements: list[ast.stmt]) -> list[ast.stmt]:
     result: list[ast.stmt] = []
     for statement in statements:
@@ -135,6 +148,7 @@ def remove_module_return_statements(statements: list[ast.stmt]) -> list[ast.stmt
             continue
         result.append(remove_module_return_statement_children(statement))
     return result
+
 
 def remove_module_return_statement_children(statement: ast.stmt) -> ast.stmt:
     if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
@@ -155,6 +169,7 @@ def remove_module_return_statement_children(statement: ast.stmt) -> ast.stmt:
         return statement
     return statement
 
+
 def remove_invalid_literal_call_statements(
     statements: list[ast.stmt],
 ) -> list[ast.stmt]:
@@ -167,6 +182,7 @@ def remove_invalid_literal_call_statements(
             continue
         cleaned.append(statement)
     return cleaned
+
 
 def remove_child_invalid_literal_call_statements(statement: ast.stmt) -> ast.stmt:
     if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
@@ -190,11 +206,13 @@ def remove_child_invalid_literal_call_statements(statement: ast.stmt) -> ast.stm
         return statement
     return statement
 
+
 def is_invalid_literal_call_statement(statement: ast.stmt) -> bool:
     if not isinstance(statement, ast.Expr):
         return False
     value = statement.value
     return isinstance(value, ast.Call) and is_invalid_call_target(value.func)
+
 
 def is_invalid_call_target(value: ast.expr) -> bool:
     return isinstance(
@@ -208,6 +226,7 @@ def is_invalid_call_target(value: ast.expr) -> bool:
         ),
     )
 
+
 def merge_adjacent_chained_assignments(statements: list[ast.stmt]) -> list[ast.stmt]:
     result: list[ast.stmt] = []
     for statement in statements:
@@ -219,6 +238,7 @@ def merge_adjacent_chained_assignments(statements: list[ast.stmt]) -> list[ast.s
             continue
         result.append(statement)
     return result
+
 
 def merge_child_chained_assignments(statement: ast.stmt) -> ast.stmt:
     if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
@@ -244,6 +264,7 @@ def merge_child_chained_assignments(statement: ast.stmt) -> ast.stmt:
         return statement
     return statement
 
+
 def can_merge_assignments(left: ast.stmt, right: ast.stmt) -> bool:
     if not isinstance(left, ast.Assign) or not isinstance(right, ast.Assign):
         return False
@@ -253,8 +274,10 @@ def can_merge_assignments(left: ast.stmt, right: ast.stmt) -> bool:
         return False
     return left.value is right.value
 
+
 def normalize_augmented_assignments(statements: list[ast.stmt]) -> list[ast.stmt]:
     return [normalize_augmented_assignment(statement) for statement in statements]
+
 
 def normalize_augmented_assignment(statement: ast.stmt) -> ast.stmt:
     if isinstance(statement, ast.Assign):
@@ -279,6 +302,7 @@ def normalize_augmented_assignment(statement: ast.stmt) -> ast.stmt:
         return statement
     return statement
 
+
 def augmented_assignment_from_assign(statement: ast.Assign) -> ast.AugAssign | None:
     if len(statement.targets) != 1:
         return None
@@ -287,11 +311,14 @@ def augmented_assignment_from_assign(statement: ast.Assign) -> ast.AugAssign | N
     if not getattr(statement.value, "_pyc2py_inplace", False):
         return None
     target = statement.targets[0]
+    if not isinstance(target, (ast.Name, ast.Attribute, ast.Subscript)):
+        return None
     if not same_assignment_target(target, statement.value.left):
         return None
     return ast.AugAssign(
         target=target, op=statement.value.op, value=statement.value.right
     )
+
 
 def same_assignment_target(target: ast.expr, value: ast.expr) -> bool:
     target_load = copy.deepcopy(target)
@@ -301,6 +328,7 @@ def same_assignment_target(target: ast.expr, value: ast.expr) -> bool:
         include_attributes=False,
     )
 
+
 def set_expression_context(value: ast.expr, context: ast.expr_context) -> None:
     if isinstance(value, (ast.Name, ast.Attribute, ast.Subscript)):
         value.ctx = context
@@ -308,6 +336,7 @@ def set_expression_context(value: ast.expr, context: ast.expr_context) -> None:
         value.ctx = context
         for item in value.elts:
             set_expression_context(item, context)
+
 
 def merge_adjacent_import_from_statements(statements: list[ast.stmt]) -> list[ast.stmt]:
     result: list[ast.stmt] = []
@@ -322,6 +351,7 @@ def merge_adjacent_import_from_statements(statements: list[ast.stmt]) -> list[as
         result.append(statement)
     return result
 
+
 def can_merge_import_from(left: ast.stmt, right: ast.stmt) -> bool:
     if not isinstance(left, ast.ImportFrom) or not isinstance(right, ast.ImportFrom):
         return False
@@ -329,10 +359,12 @@ def can_merge_import_from(left: ast.stmt, right: ast.stmt) -> bool:
         return False
     return bool(left.names and right.names)
 
+
 def normalize_try_except_finally(statements: list[ast.stmt]) -> list[ast.stmt]:
     return [
         normalize_try_except_finally_statement(statement) for statement in statements
     ]
+
 
 def normalize_try_except_finally_statement(statement: ast.stmt) -> ast.stmt:
     if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
@@ -349,6 +381,7 @@ def normalize_try_except_finally_statement(statement: ast.stmt) -> ast.stmt:
         return normalize_try_node(statement)
     return statement
 
+
 def normalize_try_node(statement: ast.Try) -> ast.Try:
     statement.body = normalize_try_except_finally(statement.body)
     statement.orelse = normalize_try_except_finally(statement.orelse)
@@ -358,6 +391,7 @@ def normalize_try_node(statement: ast.Try) -> ast.Try:
 
     nested = combined_try_except_finally(statement)
     return statement if nested is None else nested
+
 
 def combined_try_except_finally(statement: ast.Try) -> ast.Try | None:
     if statement.handlers or statement.orelse or len(statement.body) != 1:
@@ -380,11 +414,13 @@ def combined_try_except_finally(statement: ast.Try) -> ast.Try | None:
         finalbody=statement.finalbody,
     )
 
+
 def remove_synthetic_exception_cleanups(statements: list[ast.stmt]) -> list[ast.stmt]:
     cleaned = [
         remove_synthetic_exception_cleanup(statement) for statement in statements
     ]
     return remove_synthetic_exception_helper_sequences(cleaned)
+
 
 def remove_synthetic_exception_cleanup(statement: ast.stmt) -> ast.stmt:
     if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
@@ -406,6 +442,7 @@ def remove_synthetic_exception_cleanup(statement: ast.stmt) -> ast.stmt:
         return statement
     return statement
 
+
 def trim_exception_cleanup_pair(statements: list[ast.stmt]) -> list[ast.stmt]:
     body = remove_synthetic_exception_cleanups(statements)
     if len(body) < 2:
@@ -424,21 +461,23 @@ def trim_exception_cleanup_pair(statements: list[ast.stmt]) -> list[ast.stmt]:
         return body
     return [*body[:-3], body[-1]]
 
+
 def remove_synthetic_exception_helper_sequences(
     statements: list[ast.stmt],
 ) -> list[ast.stmt]:
     result: list[ast.stmt] = []
     cursor = 0
     while cursor < len(statements):
-        synthetic_cleanup = synthetic_reraise_cleanup_statement(statements[cursor])
+        statement = statements[cursor]
+        synthetic_cleanup = synthetic_reraise_cleanup_statement(statement)
         if synthetic_cleanup is not None:
             result.extend(synthetic_cleanup)
             cursor += 1
             continue
         if (
-            isinstance(statements[cursor], ast.Raise)
-            and statements[cursor].exc is None
-            and statements[cursor].cause is None
+            isinstance(statement, ast.Raise)
+            and statement.exc is None
+            and statement.cause is None
             and result
             and is_cleanup_statement(result[-1])
         ):
@@ -468,6 +507,7 @@ def remove_synthetic_exception_helper_sequences(
         cursor += 1
     return result
 
+
 def synthetic_reraise_cleanup_statement(statement: ast.stmt) -> list[ast.stmt] | None:
     if isinstance(statement, ast.Try):
         return synthetic_reraise_cleanup_try_body(statement)
@@ -478,6 +518,7 @@ def synthetic_reraise_cleanup_statement(statement: ast.stmt) -> list[ast.stmt] |
         statement.body = body or [ast.Pass()]
         return [statement]
     return None
+
 
 def synthetic_reraise_cleanup_body(body: list[ast.stmt]) -> list[ast.stmt] | None:
     if len(body) != 1:
@@ -503,8 +544,10 @@ def synthetic_reraise_cleanup_try_body(statement: ast.Try) -> list[ast.stmt] | N
         return None
     return cleanup
 
+
 def is_exception_name(value: ast.expr | None) -> bool:
     return isinstance(value, ast.Name) and value.id in {"BaseException", "Exception"}
+
 
 def is_cleanup_statement(statement: ast.stmt) -> bool:
     if isinstance(statement, ast.If):
@@ -519,6 +562,7 @@ def is_cleanup_statement(statement: ast.stmt) -> bool:
         )
     return False
 
+
 def is_synthetic_with_cleanup_start(
     statements: list[ast.stmt],
     index: int,
@@ -531,17 +575,20 @@ def is_synthetic_with_cleanup_start(
         and is_current_exception_statement(statements[index + 2])
     )
 
+
 def is_none_call_statement(statement: ast.stmt) -> bool:
     if not isinstance(statement, ast.Expr):
         return False
     value = statement.value
     return isinstance(value, ast.Call) and is_none_constant(value.func)
 
+
 def is_current_exception_statement(statement: ast.stmt) -> bool:
     if not isinstance(statement, ast.Expr):
         return False
     value = statement.value
     return isinstance(value, ast.Name) and value.id == "__pyc2py_current_exception__"
+
 
 def is_synthetic_with_reraise_guard(statement: ast.stmt) -> bool:
     if not isinstance(statement, ast.If):
@@ -552,6 +599,7 @@ def is_synthetic_with_reraise_guard(statement: ast.stmt) -> bool:
     if not isinstance(test, ast.UnaryOp) or not isinstance(test.op, ast.Not):
         return False
     return is_helper_call(test.operand, "__pyc2py_with_except_start__")
+
 
 def is_synthetic_exception_match_reraise_guard(statement: ast.stmt) -> bool:
     if not isinstance(statement, ast.If):
@@ -569,6 +617,7 @@ def is_synthetic_exception_match_reraise_guard(statement: ast.stmt) -> bool:
         return False
     return is_helper_call(test.operand, "__pyc2py_check_exc_match__")
 
+
 def is_synthetic_exception_match_continue_guard(statement: ast.stmt) -> bool:
     if not isinstance(statement, ast.If):
         return False
@@ -580,10 +629,12 @@ def is_synthetic_exception_match_continue_guard(statement: ast.stmt) -> bool:
         return False
     return is_helper_call(statement.test, "__pyc2py_check_exc_match__")
 
+
 def is_single_bare_raise_body(body: list[ast.stmt]) -> bool:
     if len(body) != 1 or not isinstance(body[0], ast.Raise):
         return False
     return body[0].exc is None and body[0].cause is None
+
 
 def is_helper_call(value: ast.expr, name: str) -> bool:
     return (
@@ -592,8 +643,10 @@ def is_helper_call(value: ast.expr, name: str) -> bool:
         and (value.func.id == name)
     )
 
+
 def is_terminal_statement(statement: ast.stmt) -> bool:
     return isinstance(statement, (ast.Break, ast.Continue, ast.Raise, ast.Return))
+
 
 def is_bare_raise_statement(statement: ast.stmt) -> bool:
     return (
@@ -601,6 +654,7 @@ def is_bare_raise_statement(statement: ast.stmt) -> bool:
         and statement.exc is None
         and statement.cause is None
     )
+
 
 def none_assignment_name(statement: ast.stmt) -> str | None:
     if not isinstance(statement, ast.Assign) or len(statement.targets) != 1:
@@ -615,11 +669,13 @@ def none_assignment_name(statement: ast.stmt) -> str | None:
         return None
     return target.id
 
+
 def is_delete_name_statement(statement: ast.stmt, name: str) -> bool:
     if not isinstance(statement, ast.Delete) or len(statement.targets) != 1:
         return False
     target = statement.targets[0]
     return isinstance(target, ast.Name) and target.id == name
+
 
 def merge_simultaneous_store_assignments(statements: list[ast.stmt]) -> list[ast.stmt]:
     result: list[ast.stmt] = []
@@ -639,6 +695,7 @@ def merge_simultaneous_store_assignments(statements: list[ast.stmt]) -> list[ast
         result.append(make_simultaneous_assignment(statements[cursor:end]))
         cursor = end
     return result
+
 
 def merge_child_simultaneous_store_assignments(statement: ast.stmt) -> ast.stmt:
     if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
@@ -660,9 +717,11 @@ def merge_child_simultaneous_store_assignments(statement: ast.stmt) -> ast.stmt:
         return statement
     return statement
 
+
 def store_group_id(statement: ast.stmt) -> int | None:
     group = getattr(statement, "_pyc2py_store_group", None)
     return group if isinstance(group, int) else None
+
 
 def make_simultaneous_assignment(statements: list[ast.stmt]) -> ast.stmt:
     assignments = [
@@ -686,6 +745,7 @@ def make_simultaneous_assignment(statements: list[ast.stmt]) -> ast.stmt:
         ),
     )
 
+
 def normalize_docstring_assignments(statements: list[ast.stmt]) -> list[ast.stmt]:
     if not statements:
         return statements
@@ -693,6 +753,7 @@ def normalize_docstring_assignments(statements: list[ast.stmt]) -> list[ast.stmt
     if docstring is None:
         return statements
     return [docstring, *statements[1:]]
+
 
 def docstring_from_assignment(statement: ast.stmt) -> ast.Expr | None:
     if not is_assignment_to(statement, "__doc__"):
@@ -703,6 +764,7 @@ def docstring_from_assignment(statement: ast.stmt) -> ast.Expr | None:
     if not isinstance(value, ast.Constant) or not isinstance(value.value, str):
         return None
     return ast.Expr(value=ast.Constant(value=value.value))
+
 
 def assignment_targets_overlap(
     left_targets: list[ast.expr],
@@ -716,6 +778,7 @@ def assignment_targets_overlap(
         seen.add(key)
     return False
 
+
 def remove_unreachable_after_terminal(statements: list[ast.stmt]) -> list[ast.stmt]:
     result: list[ast.stmt] = []
     for index, statement in enumerate(statements):
@@ -726,6 +789,7 @@ def remove_unreachable_after_terminal(statements: list[ast.stmt]) -> list[ast.st
             return result
     return result
 
+
 def remove_child_unreachable_after_terminal(
     statements: list[ast.stmt],
 ) -> list[ast.stmt]:
@@ -733,6 +797,7 @@ def remove_child_unreachable_after_terminal(
         remove_child_unreachable_after_terminal_statement(statement)
         for statement in statements
     ]
+
 
 def remove_child_unreachable_after_terminal_statement(statement: ast.stmt) -> ast.stmt:
     if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
@@ -756,6 +821,7 @@ def remove_child_unreachable_after_terminal_statement(statement: ast.stmt) -> as
         return statement
     return statement
 
+
 def clean_non_handler_body(statements: list[ast.stmt]) -> list[ast.stmt]:
     return remove_bare_raise_tail(
         remove_unreachable_after_terminal(
@@ -763,20 +829,25 @@ def clean_non_handler_body(statements: list[ast.stmt]) -> list[ast.stmt]:
         )
     )
 
+
 def remove_bare_raise_tail(statements: list[ast.stmt]) -> list[ast.stmt]:
     while statements and is_bare_raise_statement(statements[-1]):
         statements = statements[:-1]
     return statements or [ast.Pass()]
 
+
 def normalize_boolean_conditions(statements: list[ast.stmt]) -> list[ast.stmt]:
     return BooleanStatementNormalizer().normalize_body(statements)
+
 
 def normalize_boolean_condition(value: ast.expr) -> ast.expr:
     return normalize_boolean_expression(value)
 
+
 def normalize_boolean_expression(value: ast.expr) -> ast.expr:
     normalizer = BooleanExpressionNormalizer()
     return normalizer.visit(value)
+
 
 class BooleanExpressionNormalizer(ast.NodeTransformer):
     def visit_UnaryOp(self, node: ast.UnaryOp) -> ast.expr:
@@ -802,6 +873,7 @@ class BooleanExpressionNormalizer(ast.NodeTransformer):
             return node.left
         return node
 
+
 def is_nested_none_identity_compare(node: ast.Compare) -> bool:
     if not isinstance(node.left, ast.Compare):
         return False
@@ -811,6 +883,7 @@ def is_nested_none_identity_compare(node: ast.Compare) -> bool:
         return False
     comparator = node.comparators[0]
     return isinstance(comparator, ast.Constant) and comparator.value is None
+
 
 class BooleanStatementNormalizer(ast.NodeTransformer):
     def normalize_body(self, statements: list[ast.stmt]) -> list[ast.stmt]:
@@ -897,14 +970,16 @@ class BooleanStatementNormalizer(ast.NodeTransformer):
     def visit_Expr(self, node: ast.Expr) -> ast.Expr:
         return self.visit_value_owner(node)
 
+
 def normalize_pass_else_branches(statements: list[ast.stmt]) -> list[ast.stmt]:
     normalized: list[ast.stmt] = []
     for statement in statements:
-        statement = normalize_pass_else_branch_statement(statement)
-        if statement is None:
+        normalized_statement = normalize_pass_else_branch_statement(statement)
+        if normalized_statement is None:
             continue
-        normalized.append(statement)
+        normalized.append(normalized_statement)
     return normalized
+
 
 def normalize_child_statement_bodies(
     statement: ast.stmt,
@@ -925,6 +1000,7 @@ def normalize_child_statement_bodies(
             handler.body = normalize(handler.body)
     return statement
 
+
 def normalize_pass_else_branch_statement(statement: ast.stmt) -> ast.stmt | None:
     statement = normalize_child_statement_bodies(
         statement, normalize_pass_else_branches
@@ -943,6 +1019,7 @@ def normalize_pass_else_branch_statement(statement: ast.stmt) -> ast.stmt | None
         return None
     return statement
 
+
 def remove_noop_optional_clauses(statements: list[ast.stmt]) -> list[ast.stmt]:
     return [
         statement
@@ -951,6 +1028,7 @@ def remove_noop_optional_clauses(statements: list[ast.stmt]) -> list[ast.stmt]:
         )
         if statement is not None
     ]
+
 
 def remove_noop_optional_clause_statement(statement: ast.stmt) -> ast.stmt | None:
     statement = normalize_child_statement_bodies(
@@ -973,6 +1051,7 @@ def remove_noop_optional_clause_statement(statement: ast.stmt) -> ast.stmt | Non
             return None
     return statement
 
+
 def flatten_bool_values(
     op_type: type[ast.boolop],
     values: list[ast.expr],
@@ -985,6 +1064,7 @@ def flatten_bool_values(
             flattened.append(item)
     return flattened
 
+
 def simplify_boolean_absorption(value: ast.BoolOp) -> ast.expr:
     changed = True
     while changed:
@@ -996,6 +1076,7 @@ def simplify_boolean_absorption(value: ast.BoolOp) -> ast.expr:
     if len(value.values) == 1:
         return value.values[0]
     return value
+
 
 def simplify_or_absorption(value: ast.BoolOp) -> bool:
     keys = {expression_key(item) for item in value.values}
@@ -1016,6 +1097,7 @@ def simplify_or_absorption(value: ast.BoolOp) -> bool:
         value.values = flatten_bool_values(type(value.op), simplified)
     return changed
 
+
 def simplify_and_absorption(value: ast.BoolOp) -> bool:
     keys = {expression_key(item) for item in value.values}
     if not keys:
@@ -1034,6 +1116,7 @@ def simplify_and_absorption(value: ast.BoolOp) -> bool:
     if changed:
         value.values = flatten_bool_values(type(value.op), simplified)
     return changed
+
 
 def remove_complementary_term(
     values: list[ast.expr],
@@ -1057,8 +1140,10 @@ def remove_complementary_term(
         return remaining[0]
     return ast.BoolOp(op=op, values=remaining)
 
+
 def expression_key(value: ast.expr) -> str:
     return ast.dump(value, include_attributes=False)
+
 
 def complementary_expression_key(value: ast.expr) -> str | None:
     if isinstance(value, ast.UnaryOp) and isinstance(value.op, ast.Not):
@@ -1068,8 +1153,10 @@ def complementary_expression_key(value: ast.expr) -> str | None:
         return None
     return expression_key(inverted)
 
+
 MAX_DNF_TERMS = 64
 MAX_DNF_LITERALS = 12
+
 
 def simplify_or_dnf(value: ast.BoolOp) -> ast.expr:
     terms = dnf_terms(value)
@@ -1085,6 +1172,7 @@ def simplify_or_dnf(value: ast.BoolOp) -> ast.expr:
         return rebuilt[0]
     return ast.BoolOp(op=ast.Or(), values=rebuilt)
 
+
 def dnf_terms(value: ast.expr) -> list[list[ast.expr]] | None:
     if isinstance(value, ast.BoolOp) and isinstance(value.op, ast.Or):
         return dnf_or_terms(value.values)
@@ -1093,6 +1181,7 @@ def dnf_terms(value: ast.expr) -> list[list[ast.expr]] | None:
         return dnf_and_terms(value.values)
 
     return [[value]]
+
 
 def dnf_or_terms(values: list[ast.expr]) -> list[list[ast.expr]] | None:
     terms: list[list[ast.expr]] = []
@@ -1105,16 +1194,19 @@ def dnf_or_terms(values: list[ast.expr]) -> list[list[ast.expr]] | None:
             return None
     return terms
 
+
 def dnf_and_terms(values: list[ast.expr]) -> list[list[ast.expr]] | None:
     terms: list[list[ast.expr]] = [[]]
     for item in values:
         item_terms = dnf_terms(item)
         if item_terms is None:
             return None
-        terms = dnf_product_terms(terms, item_terms)
-        if terms is None:
+        product = dnf_product_terms(terms, item_terms)
+        if product is None:
             return None
+        terms = product
     return terms
+
 
 def dnf_product_terms(
     left_terms: list[list[ast.expr]],
@@ -1130,6 +1222,7 @@ def dnf_product_terms(
             if len(combined) > MAX_DNF_TERMS:
                 return None
     return combined
+
 
 def simplify_dnf_terms(terms: list[list[ast.expr]]) -> list[list[ast.expr]]:
     current: list[list[ast.expr]] = []
@@ -1152,6 +1245,7 @@ def simplify_dnf_terms(terms: list[list[ast.expr]]) -> list[list[ast.expr]]:
             changed = True
     return current
 
+
 def normalize_dnf_term(term: list[ast.expr]) -> list[ast.expr] | None:
     seen: dict[str, ast.expr] = {}
     for item in term:
@@ -1161,6 +1255,7 @@ def normalize_dnf_term(term: list[ast.expr]) -> list[ast.expr] | None:
             return None
         seen[key] = item
     return list(seen.values())
+
 
 def remove_superset_terms(terms: list[list[ast.expr]]) -> list[list[ast.expr]]:
     key_sets = [frozenset(expression_key(item) for item in term) for term in terms]
@@ -1178,6 +1273,7 @@ def remove_superset_terms(terms: list[list[ast.expr]]) -> list[list[ast.expr]]:
             keep.append(term)
     return keep
 
+
 def merge_complementary_dnf_terms(terms: list[list[ast.expr]]) -> list[list[ast.expr]]:
     for left_index, left in enumerate(terms):
         for right_index in range(left_index + 1, len(terms)):
@@ -1191,6 +1287,7 @@ def merge_complementary_dnf_terms(terms: list[list[ast.expr]]) -> list[list[ast.
                 if index not in {left_index, right_index}
             ] + [merged]
     return terms
+
 
 def merge_complementary_dnf_pair(
     left: list[ast.expr],
@@ -1212,12 +1309,14 @@ def merge_complementary_dnf_pair(
         return None
     return [left_keys[key] for key in left_keys if key in common]
 
+
 def make_and_term(term: list[ast.expr]) -> ast.expr:
     if not term:
         return ast.Constant(value=True)
     if len(term) == 1:
         return term[0]
     return ast.BoolOp(op=ast.And(), values=term)
+
 
 def invert_boolean_condition(value: ast.expr) -> ast.expr | None:
     if isinstance(value, ast.UnaryOp) and isinstance(value.op, ast.Not):
@@ -1233,6 +1332,7 @@ def invert_boolean_condition(value: ast.expr) -> ast.expr | None:
         return ast.BoolOp(op=op, values=[item for item in inverted_values if item])
     return None
 
+
 def invert_boolean_operand(value: ast.expr) -> ast.expr | None:
     if isinstance(value, ast.UnaryOp) and isinstance(value.op, ast.Not):
         return normalize_boolean_condition(value.operand)
@@ -1240,6 +1340,7 @@ def invert_boolean_operand(value: ast.expr) -> ast.expr | None:
     if inverted_compare is not None:
         return inverted_compare
     return ast.UnaryOp(op=ast.Not(), operand=value)
+
 
 def invert_compare_expression(value: ast.expr) -> ast.Compare | None:
     if not isinstance(value, ast.Compare):
@@ -1255,6 +1356,7 @@ def invert_compare_expression(value: ast.expr) -> ast.Compare | None:
         comparators=value.comparators,
     )
 
+
 INVERTED_COMPARE_OPS: dict[type[ast.cmpop], type[ast.cmpop]] = {
     ast.Eq: ast.NotEq,
     ast.NotEq: ast.Eq,
@@ -1268,14 +1370,17 @@ INVERTED_COMPARE_OPS: dict[type[ast.cmpop], type[ast.cmpop]] = {
     ast.NotIn: ast.In,
 }
 
+
 def invert_compare_op(op: ast.cmpop) -> ast.cmpop | None:
     inverted_op = INVERTED_COMPARE_OPS.get(type(op))
     if inverted_op is None:
         return None
     return inverted_op()
 
+
 def normalize_assert_statements(statements: list[ast.stmt]) -> list[ast.stmt]:
     return [normalize_assert_statement(statement) for statement in statements]
+
 
 def normalize_assert_statement(statement: ast.stmt) -> ast.stmt:
     if isinstance(statement, ast.If):
@@ -1297,6 +1402,7 @@ def normalize_assert_statement(statement: ast.stmt) -> ast.stmt:
             handler.body = normalize_assert_statements(handler.body)
     return statement
 
+
 def assert_from_if(statement: ast.If) -> ast.Assert | None:
     if statement.orelse or len(statement.body) != 1:
         return None
@@ -1308,10 +1414,12 @@ def assert_from_if(statement: ast.If) -> ast.Assert | None:
         return None
     return ast.Assert(test=test, msg=message)
 
+
 def positive_assert_test(test: ast.expr) -> ast.expr | None:
     if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not):
         return test.operand
     return None
+
 
 def assertion_message(statement: ast.stmt) -> ast.expr | None:
     if not isinstance(statement, ast.Raise):
@@ -1323,16 +1431,20 @@ def assertion_message(statement: ast.stmt) -> ast.expr | None:
         return None
     return call.args[0]
 
+
 def raises_plain_assertion_error(statement: ast.stmt) -> bool:
     if not isinstance(statement, ast.Raise):
         return False
     return is_assertion_error_expr(statement.exc)
 
+
 def is_assertion_error_expr(value: ast.expr | None) -> bool:
     return isinstance(value, ast.Name) and value.id == "AssertionError"
 
+
 def keep_module_code_after_raise(statements: list[ast.stmt]) -> list[ast.stmt]:
     return statements
+
 
 def add_global_declarations(
     statements: list[ast.stmt],
@@ -1349,6 +1461,7 @@ def add_global_declarations(
         return [statements[0], declaration, *statements[1:]]
     return [declaration, *statements]
 
+
 def add_nonlocal_declarations(
     statements: list[ast.stmt],
     names: list[str] | set[str],
@@ -1363,6 +1476,7 @@ def add_nonlocal_declarations(
     if is_docstring_statement(statements[0]):
         return [statements[0], declaration, *statements[1:]]
     return [declaration, *statements]
+
 
 def add_module_global_declarations(
     statements: list[ast.stmt],
@@ -1383,6 +1497,7 @@ def add_module_global_declarations(
         return [declaration, *statements]
     return [*statements[:insert_index], declaration, *statements[insert_index:]]
 
+
 def first_global_store_statement_index(
     statements: list[ast.stmt],
     names: set[str],
@@ -1394,6 +1509,7 @@ def first_global_store_statement_index(
             return index
     return None
 
+
 def statement_stores_any_name(statement: ast.stmt, names: set[str]) -> bool:
     for node in ast.walk(statement):
         if (
@@ -1403,6 +1519,7 @@ def statement_stores_any_name(statement: ast.stmt, names: set[str]) -> bool:
         ):
             return True
     return False
+
 
 def unique_global_names(names: list[str] | set[str]) -> list[str]:
     result: list[str] = []
@@ -1414,12 +1531,14 @@ def unique_global_names(names: list[str] | set[str]) -> list[str]:
         result.append(name)
     return result
 
+
 def is_name_store(node: ast.AST, name: str | None = None) -> bool:
     if not isinstance(node, ast.Name):
         return False
     if not isinstance(node.ctx, ast.Store):
         return False
     return name is None or node.id == name
+
 
 def is_assignment_to(statement: ast.stmt, name: str) -> bool:
     if not isinstance(statement, ast.Assign) or len(statement.targets) != 1:

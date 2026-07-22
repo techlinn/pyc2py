@@ -1,8 +1,10 @@
 import struct
 from pathlib import Path
+
 from pyc2py.pyc.flags import parse_pyc_flags
 from pyc2py.pyc.magic import find_version, read_magic_int
 from pyc2py.types import PycHeader
+
 
 def read_header(path: Path) -> PycHeader:
     data = path.read_bytes()
@@ -19,6 +21,7 @@ def read_header(path: Path) -> PycHeader:
         raw_size=len(data),
     )
 
+
 def read_header_metadata(
     data: bytes,
     version: tuple[int, ...] | None,
@@ -31,6 +34,7 @@ def read_header_metadata(
         return read_timestamp(data), read_source_size(data)
     return read_timestamp(data), None
 
+
 def read_pep552_metadata(data: bytes) -> tuple[int | None, int | None]:
     if len(data) < 8:
         return None, None
@@ -42,10 +46,12 @@ def read_pep552_metadata(data: bytes) -> tuple[int | None, int | None]:
         return None, None
     return struct.unpack("<I", data[8:12])[0], struct.unpack("<I", data[12:16])[0]
 
+
 def read_timestamp(data: bytes) -> int | None:
     if len(data) < 8:
         return None
     return struct.unpack("<I", data[4:8])[0]
+
 
 def read_source_size(data: bytes) -> int | None:
     if len(data) < 12:

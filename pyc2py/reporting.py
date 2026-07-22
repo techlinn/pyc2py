@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from pyc2py.bytecode.decoder import decode_instructions, validate_bytecode
 from pyc2py.bytecode.metadata import (
@@ -12,6 +12,14 @@ from pyc2py.pyc.validation import iter_code_objects, validate_code_object
 from pyc2py.source import validate_source, validate_source_format
 from pyc2py.stack import validate_linear_stack_effects
 from pyc2py.types import ProgressCallback, VerificationReport, emit_progress
+
+
+class ValidationResult(Protocol):
+    warnings: list[str]
+
+    @property
+    def checks(self) -> tuple[str, ...]: ...
+
 
 def validate_generated_source(
     pyc_path: Path,
@@ -63,6 +71,7 @@ def validate_generated_source(
         errors=errors,
     )
 
+
 def validate_code_recovery(
     code: Any | None,
     version: tuple[int, ...] | None,
@@ -81,9 +90,11 @@ def validate_code_recovery(
 
     return checks, warnings
 
+
 def code_object_label(code_index: int, code: Any) -> str:
     name = str(getattr(code, "co_qualname", None) or getattr(code, "co_name", "code"))
     return f"code[{code_index}] {name}"
+
 
 def validate_single_code_object(
     code: Any,
@@ -91,7 +102,7 @@ def validate_single_code_object(
 ) -> tuple[list[str], list[str]]:
     checks: list[str] = []
     warnings: list[str] = []
-    validations = [
+    validations: list[ValidationResult] = [
         validate_code_object(code),
         validate_bytecode(code, version),
     ]
@@ -104,11 +115,12 @@ def validate_single_code_object(
         warnings.extend(validation.warnings)
     return checks, warnings
 
+
 def validate_instruction_recovery(
     code: Any,
     instructions: list[Any],
     version: tuple[int, ...] | None,
-) -> list[Any]:
+) -> list[ValidationResult]:
     if not instructions:
         return []
 
@@ -118,7 +130,7 @@ def validate_instruction_recovery(
     exception_entries = safe_exception_entries(exception_table)
     graph = build_cfg(instructions, exception_entries)
     stacksize = int(getattr(code, "co_stacksize", -1) or -1)
-    validations: list[Any] = [
+    validations: list[ValidationResult] = [
         validate_line_entries(instructions),
         validate_cfg(graph),
         validate_cfg_analysis(graph),
@@ -134,6 +146,7 @@ def validate_instruction_recovery(
         )
 
     return validations
+
 
 def safe_exception_entries(exception_table: bytes) -> tuple[Any, ...]:
     if not exception_table:

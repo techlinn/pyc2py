@@ -8,17 +8,21 @@ from pyc2py.types import (
     DecompiledSource,
     LiveWarningList,
     ProgressCallback,
+    PycModule,
     VerificationReport,
     emit_progress,
 )
+
 
 @dataclass(frozen=True, slots=True)
 class DecompileResult:
     output: DecompiledSource
     report: VerificationReport
 
+
 def decompile_file(path: Path) -> DecompileResult:
     return decompile_file_to_path(path, path.with_suffix(path.suffix + ".py"))
+
 
 def decompile_file_to_directory(
     path: Path,
@@ -29,6 +33,7 @@ def decompile_file_to_directory(
         raise NotADirectoryError(output_dir)
 
     return decompile_file_to_path(path, output_dir / f"{path.name}.py", progress)
+
 
 def decompile_file_to_path(
     path: Path,
@@ -65,7 +70,9 @@ def decompile_file_to_path(
         module.code,
         progress,
     )
-    emit_progress(progress, "validation passed" if report.passed else "validation failed")
+    emit_progress(
+        progress, "validation passed" if report.passed else "validation failed"
+    )
 
     return DecompileResult(
         output=DecompiledSource(
@@ -76,6 +83,7 @@ def decompile_file_to_path(
         ),
         report=report,
     )
+
 
 def decompile_directory(
     source_dir: Path,
@@ -106,8 +114,11 @@ def decompile_directory(
 
     return results
 
-def describe_module(module) -> str:
+
+def describe_module(module: PycModule) -> str:
     header = module.header
-    version = "unknown" if header.version is None else ".".join(map(str, header.version))
+    version = (
+        "unknown" if header.version is None else ".".join(map(str, header.version))
+    )
     magic = "unknown" if header.magic_int is None else str(header.magic_int)
     return f"loaded pyc: version={version}, magic={magic}, bytes={header.raw_size}"

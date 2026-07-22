@@ -243,6 +243,7 @@ ABSOLUTE_JUMPS = {
     "POP_JUMP_IF_TRUE",
 }
 
+
 @dataclass(frozen=True, slots=True)
 class OpcodeTable:
     opname: tuple[str, ...]
@@ -256,11 +257,13 @@ class OpcodeTable:
     hasjrel: frozenset[int]
     hasjabs: frozenset[int]
 
+
 def get_opcode_table(version: tuple[int, ...]) -> OpcodeTable:
     resolved_version = resolve_supported_version(version)
     module = import_module(version_module_name(resolved_version))
 
     return build_opcode_table(module.OPMAP, resolved_version)
+
 
 def build_opcode_table(
     opmap: dict[int, str],
@@ -281,6 +284,7 @@ def build_opcode_table(
         hasjabs=opcodes_named(opmap, absolute_jump_names(resolved_version)),
     )
 
+
 def resolve_supported_version(version: tuple[int, ...]) -> tuple[int, int]:
     major_minor = normalize_version(version)
     if major_minor in SUPPORTED_VERSIONS:
@@ -291,6 +295,7 @@ def resolve_supported_version(version: tuple[int, ...]) -> tuple[int, int]:
         return supported[-1]
 
     return SUPPORTED_VERSIONS[0]
+
 
 def version_resolution_warning(version: tuple[int, ...]) -> str | None:
     requested = normalize_version(version)
@@ -303,16 +308,20 @@ def version_resolution_warning(version: tuple[int, ...]) -> str | None:
         f"using opcode table {format_version(resolved)}"
     )
 
+
 def normalize_version(version: tuple[int, ...]) -> tuple[int, int]:
     if len(version) < 2:
         raise ValueError("bytecode version must include major and minor")
     return int(version[0]), int(version[1])
 
+
 def format_version(version: tuple[int, int]) -> str:
     return f"{version[0]}.{version[1]}"
 
+
 def version_module_name(version: tuple[int, int]) -> str:
     return f"pyc2py.bytecode.versions.python_{version[0]}_{version[1]}"
+
 
 def make_opname(opmap: dict[int, str]) -> tuple[str, ...]:
     result = [f"<{opcode}>" for opcode in range(256)]
@@ -322,12 +331,14 @@ def make_opname(opmap: dict[int, str]) -> tuple[str, ...]:
 
     return tuple(result)
 
+
 def opcodes_named(opmap: dict[int, str], names: set[str]) -> frozenset[int]:
     return frozenset(
         opcode
         for opcode, name in opmap.items()
         if normalized_opcode_name(name) in names
     )
+
 
 def argument_opcodes(opmap: dict[int, str], version: tuple[int, int]) -> frozenset[int]:
     if version < (3, 12):
@@ -347,12 +358,14 @@ def argument_opcodes(opmap: dict[int, str], version: tuple[int, int]) -> frozens
         if normalized_opcode_name(name) in arg_ops
     )
 
+
 def argument_opcode_names(version: tuple[int, int]) -> set[str]:
     names = set(ARG_OPS)
     if version >= (3, 15):
         names.add("GET_ITER")
 
     return names
+
 
 def normalized_opcode_name(name: str) -> str:
     normalized_name = NORMALIZED_OPCODE_NAMES.get(name)
@@ -380,11 +393,13 @@ def normalized_opcode_name(name: str) -> str:
 
     return normalized_name
 
+
 def prefixed_opcode_name(name: str) -> str:
     for prefix, opcode_name in NORMALIZED_OPCODE_PREFIXES:
         if name.startswith(prefix):
             return opcode_name
     return name
+
 
 def relative_jump_names(version: tuple[int, int]) -> set[str]:
     names = set(RELATIVE_JUMPS)
@@ -401,6 +416,7 @@ def relative_jump_names(version: tuple[int, int]) -> set[str]:
         )
 
     return names
+
 
 def absolute_jump_names(version: tuple[int, int]) -> set[str]:
     names = set(ABSOLUTE_JUMPS)

@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from typing import Any
 
+
 @dataclass(frozen=True, slots=True)
 class PycCode:
     co_argcount: int
@@ -23,6 +24,7 @@ class PycCode:
     co_freevars: tuple[Any, ...]
     co_cellvars: tuple[Any, ...]
     co_localsplusnames: tuple[Any, ...]
+
 
 def normalize_code_object(code: Any) -> PycCode:
     return PycCode(
@@ -48,8 +50,10 @@ def normalize_code_object(code: Any) -> PycCode:
         co_localsplusnames=read_localsplusnames(code),
     )
 
+
 def normalize_consts(values: Any) -> tuple[Any, ...]:
     return tuple(normalize_const(value) for value in values)
+
 
 def normalize_const(value: Any) -> Any:
     if has_code_shape(value):
@@ -62,8 +66,10 @@ def normalize_const(value: Any) -> Any:
         return frozenset(normalize_const(item) for item in value)
     return value
 
+
 def has_code_shape(value: object) -> bool:
     return hasattr(value, "co_code") and hasattr(value, "co_consts")
+
 
 def read_int_attr(code: Any, name: str, default: int = 0) -> int:
     value = getattr(code, name, default)
@@ -71,6 +77,7 @@ def read_int_attr(code: Any, name: str, default: int = 0) -> int:
         return default
 
     return int(value)
+
 
 def read_bytes_attr(code: Any, name: str) -> bytes:
     value = getattr(code, name, b"")
@@ -83,11 +90,13 @@ def read_bytes_attr(code: Any, name: str) -> bytes:
 
     return bytes(value)
 
+
 def read_qualname(code: Any) -> str:
     value = getattr(code, "co_qualname", None)
     if value:
         return str(value)
     return str(getattr(code, "co_name", "") or "")
+
 
 def read_localsplusnames(code: Any) -> tuple[Any, ...]:
     value = getattr(code, "co_localsplusnames", None)
@@ -98,6 +107,7 @@ def read_localsplusnames(code: Any) -> tuple[Any, ...]:
     cellvars = tuple(getattr(code, "co_cellvars", ()) or ())
     freevars = tuple(getattr(code, "co_freevars", ()) or ())
     return (*varnames, *cellvars, *freevars)
+
 
 def make_code_object(
     *,
@@ -149,6 +159,7 @@ def make_code_object(
         co_localsplusnames=resolved_localsplusnames,
     )
 
+
 def make_legacy_code(
     argcount: int,
     nlocals: int,
@@ -173,10 +184,12 @@ def make_legacy_code(
         cellvars=as_text_tuple(fields["cellvars"]),
     )
 
+
 def replace_code(code: PycCode, **changes: Any) -> PycCode:
     values = {field: getattr(code, field) for field in code.__dataclass_fields__}
     values.update(changes)
     return PycCode(**values)
+
 
 def as_bytes(value: Any) -> bytes:
     if isinstance(value, bytes):
@@ -186,13 +199,16 @@ def as_bytes(value: Any) -> bytes:
 
     return bytes(value)
 
+
 def as_text(value: Any) -> str:
     if isinstance(value, bytes):
         return value.decode("latin-1", errors="surrogateescape")
     return str(value)
 
+
 def as_text_tuple(values: Any) -> tuple[str, ...]:
     return tuple(as_text(value) for value in values)
+
 
 def split_localsplus(
     names: Any, kinds: Any

@@ -3,13 +3,19 @@ import sys
 from dataclasses import dataclass, field
 from types import CodeType
 from typing import Any
+
 from pyc2py.bytecode.instruction import Instruction
+from pyc2py.bytecode.opcode_table import (
+    get_opcode_table,
+    normalized_opcode_name,
+    version_resolution_warning,
+)
 from pyc2py.bytecode.operand import (
     COMPARE_SYMBOLS,
     PACKED_LOCAL_OPS,
     SPECIAL_INDEXED_ARG_VALUES,
-    compare_index,
     common_constants,
+    compare_index,
     following_wordcode_arg,
     format_argrepr,
     free_names,
@@ -18,12 +24,8 @@ from pyc2py.bytecode.operand import (
     packed_local_indexes,
     resolve_arg_value,
 )
-from pyc2py.bytecode.opcode_table import (
-    get_opcode_table,
-    normalized_opcode_name,
-    version_resolution_warning,
-)
 from pyc2py.bytecode.scanner import scan_code
+
 
 @dataclass(slots=True)
 class BytecodeValidation:
@@ -33,6 +35,7 @@ class BytecodeValidation:
     @property
     def checks(self) -> tuple[str, ...]:
         return (f"decoded instruction count: {self.instruction_count}",)
+
 
 def decode_instructions(
     code: Any, version: tuple[int, ...] | None
@@ -47,6 +50,7 @@ def decode_instructions(
         return decode_native_instructions(code)
 
     return decode_legacy_instructions(code, version)
+
 
 def validate_bytecode(code: Any, version: tuple[int, ...] | None) -> BytecodeValidation:
     if code is None or version is None:
@@ -77,7 +81,13 @@ def validate_bytecode(code: Any, version: tuple[int, ...] | None) -> BytecodeVal
 
     return BytecodeValidation(instruction_count=len(decoded), warnings=warnings)
 
+
 def decode_native_instructions(code: CodeType) -> list[Instruction]:
+    if sys.version_info >= (3, 11):
+        decoded = dis.get_instructions(code, show_caches=True)
+    else:
+        decoded = dis.get_instructions(code)
+
     return [
         Instruction(
             offset=int(item.offset),
@@ -88,8 +98,9 @@ def decode_native_instructions(code: CodeType) -> list[Instruction]:
             starts_line=item.starts_line,
             is_jump_target=bool(item.is_jump_target),
         )
-        for item in dis.get_instructions(code, show_caches=True)
+        for item in decoded
     ]
+
 
 def validate_instruction_objects(instructions: list[Instruction]) -> BytecodeValidation:
     warnings: list[str] = []
@@ -112,6 +123,7 @@ def validate_instruction_objects(instructions: list[Instruction]) -> BytecodeVal
             )
 
     return BytecodeValidation(instruction_count=len(instructions), warnings=warnings)
+
 
 def decode_legacy_instructions(
     code: Any, version: tuple[int, ...]
@@ -149,10 +161,12 @@ def decode_legacy_instructions(
 
     return instructions
 
+
 def legacy_instruction_line(item: Any, line_starts: dict[int, int]) -> int | None:
     if item.opname == "SET_LINENO":
         return item.arg
     return line_starts.get(item.offset)
+
 
 def legacy_line_starts(code: Any) -> dict[int, int]:
     lnotab = bytes(getattr(code, "co_lnotab", b"") or b"")
@@ -171,10 +185,12 @@ def legacy_line_starts(code: Any) -> dict[int, int]:
 
     return starts
 
+
 def signed_byte(value: int) -> int:
     if value < 128:
         return value
     return value - 256
+
 
 def validate_decoded_opcode(
     code: Any,
@@ -198,6 +214,7 @@ def validate_decoded_opcode(
 
     return warnings
 
+
 def validate_decoded_operand(
     code: Any,
     opcode_table: Any,
@@ -218,6 +235,7 @@ def validate_decoded_operand(
         return warnings
 
     return []
+
 
 def validate_indexed_decoded_operand(
     code: Any,
@@ -248,6 +266,7 @@ def validate_indexed_decoded_operand(
         )
 
     return []
+
 
 def validate_special_decoded_operand(
     code: Any,
@@ -280,6 +299,7 @@ def validate_special_decoded_operand(
         return []
     return validate_index(special_arg_label(opname), item.offset, values, arg)
 
+
 def special_arg_label(opname: str) -> str:
     if opname == "BINARY_OP":
         return "binary-op"
@@ -289,6 +309,7 @@ def special_arg_label(opname: str) -> str:
         return "intrinsic-2"
     return opname.lower().replace("_", "-")
 
+
 def validate_packed_local_operand(code: Any, offset: int, arg: int) -> list[str]:
     high_index, low_index = packed_local_indexes(arg)
     varnames = getattr(code, "co_varnames", ())
@@ -297,6 +318,7 @@ def validate_packed_local_operand(code: Any, offset: int, arg: int) -> list[str]
         *validate_index("local", offset, varnames, high_index),
         *validate_index("local", offset, varnames, low_index),
     ]
+
 
 def validate_wordcode_superinstruction_operand(
     code: Any,
@@ -326,6 +348,7 @@ def validate_wordcode_superinstruction_operand(
         *validate_index("local", offset, varnames, second_arg),
     ]
 
+
 def validate_decoded_jump(
     code: Any,
     opcode_table: Any,
@@ -344,6 +367,7 @@ def validate_decoded_jump(
         return [f"jump target is outside decoded offsets at {item.offset}: {target}"]
     return []
 
+
 def validate_index(label: str, offset: int, values: Any, index: int) -> list[str]:
     if index < 0:
         return [f"{label} operand index is negative at {offset}: {index}"]
@@ -360,8 +384,10 @@ def validate_index(label: str, offset: int, values: Any, index: int) -> list[str
 
     return []
 
+
 def is_unknown_opname(opname: str) -> bool:
     return opname.startswith("<") and opname.endswith(">")
+
 
 def is_jump_opname(opname: str) -> bool:
     return "JUMP" in opname or opname in {"FOR_ITER", "CONTINUE_LOOP"}

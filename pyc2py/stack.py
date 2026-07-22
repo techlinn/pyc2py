@@ -1,14 +1,17 @@
+from collections.abc import Iterable, Iterator, MutableSequence
 from dataclasses import dataclass, field
 from typing import Generic, TypeVar, overload
-from collections.abc import Iterable, Iterator, MutableSequence
+
 from pyc2py.bytecode.instruction import Instruction
 from pyc2py.bytecode.stack_effect import instruction_stack_effect
 from pyc2py.cfg import BasicBlock, CFGEdge, ControlFlowGraph, build_cfg
 
 T = TypeVar("T")
 
+
 class StackUnderflowError(IndexError):
     pass
+
 
 class FastStack(Generic[T], MutableSequence[T]):
     def __init__(self, values: Iterable[T] = (), max_depth: int | None = None) -> None:
@@ -133,7 +136,9 @@ class FastStack(Generic[T], MutableSequence[T]):
         if self.max_depth is not None and len(self.values) > self.max_depth:
             raise ValueError("stack exceeded max_depth")
 
+
 MAX_CFG_STACK_STATES = 4096
+
 
 @dataclass(slots=True)
 class StackValidation:
@@ -183,6 +188,7 @@ class StackValidation:
             )
         return tuple(checks)
 
+
 def validate_linear_stack_effects(
     instructions: list[Instruction],
     expected_stacksize: int | None = None,
@@ -227,11 +233,13 @@ def validate_linear_stack_effects(
         warnings=cfg_validation.warnings,
     )
 
+
 @dataclass(frozen=True, slots=True)
 class StackStep:
     depth: int
     known: bool
     underflow: bool
+
 
 @dataclass(frozen=True, slots=True)
 class CFGStackValidation:
@@ -242,6 +250,7 @@ class CFGStackValidation:
     depth_conflicts: int
     exception_edges_skipped: int
     warnings: list[str] = field(default_factory=list)
+
 
 def validate_cfg_stack_depths(
     instructions: list[Instruction],
@@ -301,6 +310,7 @@ def validate_cfg_stack_depths(
         warnings=warnings,
     )
 
+
 @dataclass(slots=True)
 class CFGStackWalkState:
     state_count: int = 0
@@ -308,6 +318,7 @@ class CFGStackWalkState:
     underflow_risks: int = 0
     depth_conflicts: int = 0
     exception_edges_skipped: int = 0
+
 
 def make_empty_cfg_stack_validation() -> CFGStackValidation:
     return CFGStackValidation(
@@ -318,6 +329,7 @@ def make_empty_cfg_stack_validation() -> CFGStackValidation:
         depth_conflicts=0,
         exception_edges_skipped=0,
     )
+
 
 def apply_block_stack_effects(
     state: CFGStackWalkState,
@@ -336,6 +348,7 @@ def apply_block_stack_effects(
         state.max_depth = max(state.max_depth, depth)
     return depth
 
+
 def non_exception_successors(
     graph: ControlFlowGraph, block_offset: int
 ) -> tuple[CFGEdge, ...]:
@@ -343,13 +356,17 @@ def non_exception_successors(
         edge for edge in graph.successors(block_offset) if edge.kind != "exception"
     )
 
+
 def append_successor_depths(
     work: list[tuple[int, int]],
     successors: tuple[CFGEdge, ...],
     blocks: dict[int, BasicBlock],
     exit_depth: int,
 ) -> None:
-    work.extend((edge.target, exit_depth) for edge in successors if edge.target in blocks)
+    work.extend(
+        (edge.target, exit_depth) for edge in successors if edge.target in blocks
+    )
+
 
 def apply_instruction_effect(
     depth: int,
@@ -364,6 +381,7 @@ def apply_instruction_effect(
     return StackStep(
         depth=depth - effect.pops + effect.pushes, known=True, underflow=False
     )
+
 
 def format_depths(depths: tuple[int, ...]) -> str:
     if not depths:

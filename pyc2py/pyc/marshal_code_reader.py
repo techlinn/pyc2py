@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from typing import Any
 
 from pyc2py.pyc.code import (
@@ -11,8 +12,15 @@ from pyc2py.pyc.code import (
     split_localsplus,
 )
 from pyc2py.pyc.primitives import read_int16, read_int32
+from pyc2py.pyc.reference import ReferenceTable
+
 
 class MarshalCodeReaderMixin:
+    data: bytes
+    version: tuple[int, ...]
+    refs: ReferenceTable
+    read_object: Callable[[int, int], tuple[Any, int]]
+
     def read_code(self, offset: int, depth: int, has_ref: bool) -> tuple[PycCode, int]:
         reserved = self.refs.reserve(has_ref)
 

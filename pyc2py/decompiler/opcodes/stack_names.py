@@ -41,19 +41,24 @@ ROTATION_COUNTS = {
     "ROT_FOUR": 4,
 }
 
+
 def rotation_count(opname: str) -> int:
     return ROTATION_COUNTS[opname]
+
 
 def safe_identifier(name: str) -> str:
     if name.isidentifier() and not keyword.iskeyword(name):
         return name
     return "value"
 
+
 def make_name(name: str, ctx: ast.expr_context) -> ast.Name:
     return ast.Name(id=safe_identifier(name), ctx=ctx)
 
+
 def is_annotations_name(value: ast.expr) -> bool:
     return isinstance(value, ast.Name) and value.id == "__annotations__"
+
 
 def is_null_sentinel(value: ast.expr) -> bool:
     return isinstance(value, ast.Name) and value.id == "NULL"

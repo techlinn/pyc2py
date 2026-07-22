@@ -1,7 +1,9 @@
 from dataclasses import dataclass, field
 from typing import Any
+
 from pyc2py.constants import MAX_CODE_SIZE
 from pyc2py.pyc.code import has_code_shape, read_bytes_attr, read_int_attr
+
 
 def iter_code_objects(root: Any | None, max_objects: int = 10_000) -> list[Any]:
     if root is None:
@@ -17,9 +19,12 @@ def iter_code_objects(root: Any | None, max_objects: int = 10_000) -> list[Any]:
         code = work.pop()
         result.append(code)
         work.extend(
-            value for value in getattr(code, "co_consts", ()) or () if has_code_shape(value)
+            value
+            for value in getattr(code, "co_consts", ()) or ()
+            if has_code_shape(value)
         )
     raise ValueError("code object walk exceeded max_objects")
+
 
 @dataclass(slots=True)
 class CodeObjectValidation:
@@ -30,6 +35,7 @@ class CodeObjectValidation:
     def checks(self) -> tuple[str, ...]:
         return (f"nested code object constants: {self.nested_code_count}",)
 
+
 def validate_code_object(code: Any) -> CodeObjectValidation:
     warnings: list[str] = []
     warnings.extend(validate_code_counts(code))
@@ -39,6 +45,7 @@ def validate_code_object(code: Any) -> CodeObjectValidation:
         nested_code_count=count_nested_code_constants(code),
         warnings=warnings,
     )
+
 
 def validate_code_counts(code: Any) -> list[str]:
     warnings: list[str] = []
@@ -77,6 +84,7 @@ def validate_code_counts(code: Any) -> list[str]:
 
     return warnings
 
+
 def validate_code_field_shapes(code: Any) -> list[str]:
     warnings: list[str] = []
     code_bytes = read_bytes_attr(code, "co_code")
@@ -100,6 +108,7 @@ def validate_code_field_shapes(code: Any) -> list[str]:
             warnings.append(f"{field_name} is not text: {type(value).__name__}")
 
     return warnings
+
 
 def count_nested_code_constants(code: Any) -> int:
     count = 0

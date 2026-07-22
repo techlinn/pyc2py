@@ -5,16 +5,19 @@ from typing import Any
 
 from pyc2py.decompiler.opcodes.stack_names import is_null_sentinel
 
+
 @dataclass(frozen=True, slots=True)
 class ImportValue:
     name: str
     level: Any
     fromlist: Any
 
+
 @dataclass(frozen=True, slots=True)
 class ImportedAttributeValue:
     module: ImportValue
     name: str
+
 
 @dataclass(frozen=True, slots=True)
 class CallArgumentPlan:
@@ -24,13 +27,16 @@ class CallArgumentPlan:
     has_star_kwargs: bool = False
     keyword_names_on_stack: bool = False
 
+
 ExpressionFactory = Callable[[Any], ast.expr]
+
 
 def make_import_statement(store_name: str, value: ImportValue) -> ast.stmt:
     module_name = value.name
     asname = None if store_name == module_name.split(".")[0] else store_name
 
     return ast.Import(names=[ast.alias(name=module_name, asname=asname)])
+
 
 def make_import_from_statement(
     store_name: str, value: ImportedAttributeValue
@@ -48,6 +54,7 @@ def make_import_from_statement(
         level=get_import_level(value.module.level),
     )
 
+
 def is_dotted_import_alias(store_name: str, value: ImportedAttributeValue) -> bool:
     if get_import_level(value.module.level) != 0:
         return False
@@ -55,10 +62,10 @@ def is_dotted_import_alias(store_name: str, value: ImportedAttributeValue) -> bo
         return False
     return value.module.name.endswith(f".{value.name}") and store_name != value.name
 
+
 def is_none_fromlist(value: Any) -> bool:
-    return value is None or (
-        isinstance(value, ast.Constant) and value.value is None
-    )
+    return value is None or (isinstance(value, ast.Constant) and value.value is None)
+
 
 def make_import_star_statement(value: ImportValue) -> ast.ImportFrom:
     return ast.ImportFrom(
@@ -67,10 +74,12 @@ def make_import_star_statement(value: ImportValue) -> ast.ImportFrom:
         level=get_import_level(value.level),
     )
 
+
 def get_import_level(value: Any) -> int:
     if isinstance(value, ast.Constant) and isinstance(value.value, int):
         return max(0, value.value)
     return 0
+
 
 LEGACY_CALL_OPS = frozenset(
     {
@@ -82,12 +91,14 @@ LEGACY_CALL_OPS = frozenset(
     }
 )
 
+
 def uses_legacy_call_argument(opname: str, version: tuple[int, ...] | None) -> bool:
     if opname not in LEGACY_CALL_OPS:
         return False
     if version is None or len(version) < 2:
         return False
     return version < (3, 6)
+
 
 def uses_stack_keyword_names(opname: str, version: tuple[int, ...] | None) -> bool:
     if opname == "CALL_KW":
@@ -97,6 +108,7 @@ def uses_stack_keyword_names(opname: str, version: tuple[int, ...] | None) -> bo
     if version is None or len(version) < 2:
         return False
     return version >= (3, 6)
+
 
 def make_keywords(
     arguments: list[ast.expr], names: tuple[str, ...]
@@ -112,12 +124,14 @@ def make_keywords(
         for name, value in zip(names, values, strict=True)
     ]
 
+
 def keyword_name_from_expr(value: ast.expr) -> str | None:
     if isinstance(value, ast.Constant) and isinstance(value.value, str):
         return value.value
     if isinstance(value, ast.Str):
-        return value.s
+        return value.s if isinstance(value.s, str) else None
     return None
+
 
 def split_legacy_call_counts(arg: int, opname: str) -> tuple[int, int, bool, bool]:
     if arg < 0:
@@ -130,6 +144,7 @@ def split_legacy_call_counts(arg: int, opname: str) -> tuple[int, int, bool, boo
 
     return positional_count, keyword_count, has_star_args, has_star_kwargs
 
+
 def raw_legacy_call_argument_count(arg: int, opname: str) -> int:
     positional_count, keyword_count, has_star_args, has_star_kwargs = (
         split_legacy_call_counts(
@@ -140,6 +155,7 @@ def raw_legacy_call_argument_count(arg: int, opname: str) -> int:
     return (
         positional_count + keyword_count * 2 + int(has_star_args) + int(has_star_kwargs)
     )
+
 
 def make_call_argument_plan(
     opname: str,
@@ -169,6 +185,7 @@ def make_call_argument_plan(
 
     return CallArgumentPlan(raw_count=arg)
 
+
 def split_call_arguments(
     raw_arguments: list[Any],
     keyword_names: tuple[str, ...],
@@ -191,6 +208,7 @@ def split_call_arguments(
     positional_count = len(arguments) - len(keywords)
 
     return arguments[:positional_count], keywords
+
 
 def split_legacy_call_arguments(
     raw_arguments: list[Any],
@@ -221,6 +239,7 @@ def split_legacy_call_arguments(
 
     return positional, keywords
 
+
 def make_call_star_args(expression: ast.expr) -> list[ast.expr]:
     if isinstance(expression, ast.Tuple):
         return list(expression.elts)
@@ -229,6 +248,7 @@ def make_call_star_args(expression: ast.expr) -> list[ast.expr]:
         return list(expression.elts)
 
     return [ast.Starred(value=expression, ctx=ast.Load())]
+
 
 def make_legacy_keywords(
     keyword_items: list[Any],
@@ -242,6 +262,7 @@ def make_legacy_keywords(
         keywords.append(ast.keyword(arg=name, value=value))
 
     return keywords
+
 
 def make_starred_keywords(expression: ast.expr) -> list[ast.keyword]:
     if is_null_sentinel(expression):
@@ -263,6 +284,7 @@ def make_starred_keywords(expression: ast.expr) -> list[ast.keyword]:
 
     return [ast.keyword(arg=None, value=expression)]
 
+
 def make_unpacked_dict_keywords(expression: ast.Dict) -> list[ast.keyword] | None:
     keywords: list[ast.keyword] = []
     seen: set[str] = set()
@@ -280,6 +302,7 @@ def make_unpacked_dict_keywords(expression: ast.Dict) -> list[ast.keyword] | Non
 
     return keywords
 
+
 def keyword_names_from_value(value: Any) -> tuple[str, ...] | None:
     if isinstance(value, tuple) and all(isinstance(item, str) for item in value):
         return value
@@ -293,6 +316,7 @@ def keyword_names_from_value(value: Any) -> tuple[str, ...] | None:
         return tuple(names)
 
     return None
+
 
 def make_super_attribute(
     super_function: ast.expr,

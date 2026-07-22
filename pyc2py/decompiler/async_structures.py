@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from pyc2py.bytecode.instruction import Instruction
 from pyc2py.decompiler.structures import find_loop_back_jump
 
+
 @dataclass(frozen=True, slots=True)
 class AsyncForLoopPattern:
     target_start_index: int
@@ -12,12 +13,14 @@ class AsyncForLoopPattern:
     after_index: int
     empty_body_is_continue: bool = False
 
+
 @dataclass(frozen=True, slots=True)
 class AsyncForHeader:
     setup_except_index: int
     get_anext_index: int
     target_start_index: int
     target_end_index: int
+
 
 ASYNC_FOR_HANDLER_PREFIX = {"CACHE", "EXTENDED_ARG", "NOP"}
 ASYNC_FOR_CLEANUP_OPS = {
@@ -30,6 +33,7 @@ ASYNC_FOR_CLEANUP_OPS = {
     "POP_EXCEPT",
     "POP_BLOCK",
 }
+
 
 def find_async_for_loop_pattern(
     instructions: list[Instruction],
@@ -52,6 +56,7 @@ def find_async_for_loop_pattern(
         get_aiter_index,
         end_index,
     )
+
 
 def find_legacy_async_for_loop_pattern(
     instructions: list[Instruction],
@@ -103,6 +108,7 @@ def find_legacy_async_for_loop_pattern(
         loop_offsets,
         body_span,
     )
+
 
 def find_modern_async_for_loop_pattern(
     instructions: list[Instruction],
@@ -162,6 +168,7 @@ def find_modern_async_for_loop_pattern(
         after_index=after_index,
     )
 
+
 def find_async_for_header(
     instructions: list[Instruction],
     get_aiter_index: int,
@@ -200,6 +207,7 @@ def find_async_for_header(
         target_end_index=target_end_index,
     )
 
+
 def find_async_for_handler_start(
     instructions: list[Instruction],
     offset_to_index: dict[int, int],
@@ -207,6 +215,7 @@ def find_async_for_handler_start(
 ) -> int | None:
     setup_except = instructions[header.setup_except_index]
     return offset_to_index.get(int(setup_except.argval))
+
 
 def make_legacy_async_for_pattern(
     instructions: list[Instruction],
@@ -234,6 +243,7 @@ def make_legacy_async_for_pattern(
         ),
     )
 
+
 def find_modern_async_for_get_anext_index(
     instructions: list[Instruction],
     get_aiter_index: int,
@@ -254,6 +264,7 @@ def find_modern_async_for_get_anext_index(
 
     return get_anext_index
 
+
 def find_modern_async_for_end_send_index(
     instructions: list[Instruction],
     offset_to_index: dict[int, int],
@@ -267,6 +278,7 @@ def find_modern_async_for_end_send_index(
         return None
 
     return end_send_index
+
 
 def find_modern_async_for_target_span(
     instructions: list[Instruction],
@@ -283,6 +295,7 @@ def find_modern_async_for_target_span(
         return None
 
     return target_start_index, target_end_index
+
 
 def find_async_for_setup_except_index(
     instructions: list[Instruction],
@@ -304,6 +317,7 @@ def find_async_for_setup_except_index(
 
     return setup_except_index
 
+
 def find_async_for_get_anext_index(
     instructions: list[Instruction],
     setup_except_index: int,
@@ -316,6 +330,7 @@ def find_async_for_get_anext_index(
         return None
 
     return get_anext_index
+
 
 def find_async_for_header_target_span(
     instructions: list[Instruction],
@@ -333,6 +348,7 @@ def find_async_for_header_target_span(
 
     return target_start_index, target_end_index
 
+
 def is_async_for_next_sequence(
     instructions: list[Instruction],
     get_anext_index: int,
@@ -345,6 +361,7 @@ def is_async_for_next_sequence(
     if instructions[get_anext_index + 1].opname != "LOAD_CONST":
         return False
     return instructions[get_anext_index + 2].opname in {"YIELD_FROM", "SEND"}
+
 
 def find_async_for_body_span(
     instructions: list[Instruction],
@@ -365,9 +382,10 @@ def find_async_for_body_span(
         body_start_index = header.target_end_index + 1
         return body_start_index, body_start_index
 
-    body_start_index = offset_to_index.get(int(body_jump.argval))
-    if body_start_index is None or body_start_index <= header.target_end_index:
+    resolved_body_start = offset_to_index.get(int(body_jump.argval))
+    if resolved_body_start is None or resolved_body_start <= header.target_end_index:
         return None
+    body_start_index = resolved_body_start
 
     body_end_index = find_loop_back_jump(
         instructions,
@@ -380,6 +398,7 @@ def find_async_for_body_span(
 
     return body_start_index, body_end_index
 
+
 def skip_async_for_prefix(
     instructions: list[Instruction],
     start_index: int,
@@ -391,6 +410,7 @@ def skip_async_for_prefix(
     ):
         cursor += 1
     return cursor
+
 
 def find_async_for_target_end(
     instructions: list[Instruction],
@@ -417,6 +437,7 @@ def find_async_for_target_end(
         target_end += 1
     return target_end
 
+
 def find_async_for_cleanup_jump(
     instructions: list[Instruction],
     offset_to_index: dict[int, int],
@@ -432,6 +453,7 @@ def find_async_for_cleanup_jump(
         return offset_to_index.get(int(instruction.argval))
     return None
 
+
 def skip_async_for_cleanup(
     instructions: list[Instruction],
     cleanup_index: int,
@@ -443,6 +465,7 @@ def skip_async_for_cleanup(
             return cursor + 1
         cursor += 1
     return cursor
+
 
 def skip_modern_async_for_cleanup(
     instructions: list[Instruction],
@@ -461,6 +484,7 @@ def skip_modern_async_for_cleanup(
             return None
         cursor += 1
     return None
+
 
 def has_empty_async_for_continue_marker(
     instructions: list[Instruction],
@@ -482,6 +506,7 @@ def has_empty_async_for_continue_marker(
             loop_jumps += 1
 
     return loop_jumps > 1
+
 
 def make_async_for_statement(
     target: ast.expr,

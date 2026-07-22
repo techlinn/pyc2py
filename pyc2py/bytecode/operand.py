@@ -4,10 +4,12 @@ from pyc2py.bytecode.opcode_table import normalized_opcode_name
 
 ARG_NOT_RESOLVED = object()
 
+
 def is_jump_instruction(opcode_table: Any, opcode: int) -> bool:
     return opcode in getattr(opcode_table, "hasjrel", ()) or opcode in getattr(
         opcode_table, "hasjabs", ()
     )
+
 
 def instruction_size(version: tuple[int, ...], has_arg: bool = True) -> int:
     if version >= (3, 6):
@@ -15,13 +17,48 @@ def instruction_size(version: tuple[int, ...], has_arg: bool = True) -> int:
 
     return 3 if has_arg else 1
 
+
 COMPARE_SYMBOLS = (
-    "<", "<=", "==", "!=", ">", ">=", "in", "not in", "is", "is not", "exception-match",
+    "<",
+    "<=",
+    "==",
+    "!=",
+    ">",
+    ">=",
+    "in",
+    "not in",
+    "is",
+    "is not",
+    "exception-match",
 )
 
 BINARY_OP_SYMBOLS = (
-    "+", "&", "//", "<<", "@", "*", "%", "|", "**", ">>", "-", "/", "^",
-    "+=", "&=", "//=", "<<=", "@=", "*=", "%=", "|=", "**=", ">>=", "-=", "/=", "^=",
+    "+",
+    "&",
+    "//",
+    "<<",
+    "@",
+    "*",
+    "%",
+    "|",
+    "**",
+    ">>",
+    "-",
+    "/",
+    "^",
+    "+=",
+    "&=",
+    "//=",
+    "<<=",
+    "@=",
+    "*=",
+    "%=",
+    "|=",
+    "**=",
+    ">>=",
+    "-=",
+    "/=",
+    "^=",
     "[]",
 )
 
@@ -72,6 +109,7 @@ SPECIAL_INDEXED_ARG_VALUES = {
     "CALL_INTRINSIC_2": INTRINSIC_2_NAMES,
 }
 
+
 def resolve_arg_value(
     code: Any,
     opcode_table: Any,
@@ -98,6 +136,7 @@ def resolve_arg_value(
 
     return resolve_jump_arg(opcode_table, opcode, opname, arg, offset, version)
 
+
 def resolve_indexed_arg(
     code: Any,
     opcode_table: Any,
@@ -120,6 +159,7 @@ def resolve_indexed_arg(
         return read_indexed(COMPARE_SYMBOLS, compare_index(arg, version))
     return ARG_NOT_RESOLVED
 
+
 def resolve_special_arg(
     code: Any,
     normalized_opname: str,
@@ -141,6 +181,7 @@ def resolve_special_arg(
         return ARG_NOT_RESOLVED
     return read_indexed(values, arg)
 
+
 def resolve_jump_arg(
     opcode_table: Any,
     opcode: int,
@@ -155,6 +196,7 @@ def resolve_jump_arg(
         return absolute_target(arg, version)
     return arg
 
+
 def read_indexed(values: Any, index: int) -> Any:
     if index < 0:
         return index
@@ -162,6 +204,7 @@ def read_indexed(values: Any, index: int) -> Any:
         return values[index]
     except (IndexError, TypeError):
         return index
+
 
 WORDCODE_SUPERINSTRUCTIONS = frozenset(
     {
@@ -182,6 +225,7 @@ PACKED_LOCAL_OPS = frozenset(
     }
 )
 
+
 def superinstruction_values(
     code: Any,
     offset: int,
@@ -200,12 +244,14 @@ def superinstruction_values(
         return read_indexed(varnames, first_arg), read_indexed(consts, second_arg)
     return read_indexed(varnames, first_arg), read_indexed(varnames, second_arg)
 
+
 def following_wordcode_arg(code: Any, offset: int) -> int | None:
     code_bytes = bytes(getattr(code, "co_code", b"") or b"")
     next_arg_offset = offset + 3
     if next_arg_offset >= len(code_bytes):
         return None
     return code_bytes[next_arg_offset]
+
 
 def packed_local_names(values: Any, arg: int) -> tuple[Any, Any]:
     high_index, low_index = packed_local_indexes(arg)
@@ -214,13 +260,16 @@ def packed_local_names(values: Any, arg: int) -> tuple[Any, Any]:
         read_indexed(values, low_index),
     )
 
+
 def packed_local_indexes(arg: int) -> tuple[int, int]:
     return arg >> 4, arg & 0x0F
+
 
 def common_constants(version: tuple[int, ...]) -> tuple[Any, ...]:
     if version >= (3, 15):
         return COMMON_CONSTANTS_3_15
     return COMMON_CONSTANTS_3_14
+
 
 def free_names(
     code: Any,
@@ -239,6 +288,7 @@ def free_names(
         getattr(code, "co_freevars", ()) or ()
     )
 
+
 def name_index(opname: str, arg: int, version: tuple[int, ...]) -> int:
     opname = normalized_opcode_name(opname)
 
@@ -255,6 +305,7 @@ def name_index(opname: str, arg: int, version: tuple[int, ...]) -> int:
         return arg >> 2
     return arg
 
+
 def compare_index(arg: int, version: tuple[int, ...]) -> int:
     if version >= (3, 13):
         return arg >> 5
@@ -262,10 +313,12 @@ def compare_index(arg: int, version: tuple[int, ...]) -> int:
         return arg >> 4
     return arg
 
+
 def absolute_target(arg: int, version: tuple[int, ...]) -> int:
     if version >= (3, 10):
         return arg * 2
     return arg
+
 
 def relative_target(
     opname: str, offset: int, arg: int, version: tuple[int, ...]
@@ -286,6 +339,7 @@ def relative_target(
         return offset + 2 + arg
     return offset + 3 + arg
 
+
 def inline_cache_entries(opname: str, version: tuple[int, ...]) -> int:
     if version < (3, 12):
         return 0
@@ -303,6 +357,7 @@ def inline_cache_entries(opname: str, version: tuple[int, ...]) -> int:
     }:
         return 1
     return 0
+
 
 def format_argrepr(opname: str, argval: Any) -> str:
     if argval is None:

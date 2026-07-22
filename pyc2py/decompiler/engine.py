@@ -1,4 +1,5 @@
 import ast
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -23,18 +24,24 @@ from pyc2py.decompiler.exception_structures import (
 )
 from pyc2py.decompiler.opcode_runtime import OpcodeRuntimeMixin
 from pyc2py.decompiler.opcodes.flow import is_jump_op, is_terminal_op
-from pyc2py.decompiler.print_runtime import PrintRuntimeMixin
-from pyc2py.decompiler.print_runtime import render_legacy_print_source
+from pyc2py.decompiler.print_runtime import (
+    PrintRuntimeMixin,
+    render_legacy_print_source,
+)
 from pyc2py.decompiler.stack_runtime import StackRuntimeMixin
-from pyc2py.decompiler.structures import is_forward_conditional_jump
-from pyc2py.decompiler.structures import skip_returning_with_exception_handler
+from pyc2py.decompiler.structures import (
+    is_forward_conditional_jump,
+    skip_returning_with_exception_handler,
+)
 from pyc2py.stack import FastStack
 from pyc2py.types import LiveWarningList, ProgressCallback
+
 
 @dataclass(slots=True)
 class NativeResult:
     source: str
     warnings: tuple[str, ...]
+
 
 @dataclass(slots=True)
 class NativeDecompiler(
@@ -535,7 +542,9 @@ class NativeDecompiler(
             )
         return None
 
-    def loop_branch_handler(self, opname: str):
+    def loop_branch_handler(
+        self, opname: str
+    ) -> Callable[[list[Instruction], dict[int, int], int, int], int | None] | None:
         return {
             "GET_ITER": self.try_translate_iter_loop,
             "GET_AITER": self.try_translate_async_iter_loop,
@@ -587,6 +596,7 @@ class NativeDecompiler(
             end_index,
         )
 
+
 def decompile_native_source(
     code: Any,
     version: tuple[int, ...] | None,
@@ -598,6 +608,7 @@ def decompile_native_source(
         is_module=True,
         progress=progress,
     ).decompile()
+
 
 def add_missing_local_initializers(
     body: list[ast.stmt],
@@ -616,6 +627,7 @@ def add_missing_local_initializers(
         for name in sorted(missing)
     ]
     return [*initializers, *body]
+
 
 def missing_loaded_stored_locals(
     body: list[ast.stmt],
@@ -647,13 +659,12 @@ def missing_loaded_stored_locals(
                 loaded.add(node.id)
             elif isinstance(node.ctx, (ast.Store, ast.Del)):
                 assigned.add(node.id)
-        elif isinstance(node, ast.MatchAs) and node.name is not None:
-            assigned.add(node.name)
-        elif isinstance(node, ast.MatchStar) and node.name is not None:
+        elif isinstance(node, (ast.MatchAs, ast.MatchStar)) and node.name is not None:
             assigned.add(node.name)
         elif isinstance(node, ast.MatchMapping) and node.rest is not None:
             assigned.add(node.rest)
     return (loaded & bytecode_stores & local_names) - assigned
+
 
 def walk_current_scope_nodes(body: list[ast.stmt]) -> list[ast.AST]:
     nodes: list[ast.AST] = []
@@ -678,6 +689,7 @@ def walk_current_scope_nodes(body: list[ast.stmt]) -> list[ast.AST]:
         work.extend(reversed(list(ast.iter_child_nodes(node))))
     return nodes
 
+
 CO_FUTURE_UNICODE_LITERALS = 0x20000
 
 STORE_TARGET_PREFIX_OPS = {
@@ -689,6 +701,7 @@ STORE_TARGET_PREFIX_OPS = {
     "LOAD_GLOBAL",
     "LOAD_NAME",
 }
+
 
 def has_following_subscript_stores(
     instructions: list[Instruction],
@@ -709,6 +722,7 @@ def has_following_subscript_stores(
         return False
     return False
 
+
 GLOBAL_CHAIN_PREFIX_OPS = {"CACHE", "EXTENDED_ARG", "NOP", "SET_LINENO"}
 STORE_CHAIN_OPS = {
     "STORE_ATTR",
@@ -718,6 +732,7 @@ STORE_CHAIN_OPS = {
     "STORE_NAME",
     "STORE_SUBSCR",
 }
+
 
 def should_skip_dead_jump_after_terminal(
     instructions: list[Instruction],
@@ -734,6 +749,7 @@ def should_skip_dead_jump_after_terminal(
         return False
     return is_jump_op(instruction.opname)
 
+
 def should_skip_generator_prologue_pop(
     instructions: list[Instruction],
     cursor: int,
@@ -744,6 +760,7 @@ def should_skip_generator_prologue_pop(
     if instructions[cursor].opname != "POP_TOP":
         return False
     return instructions[start_index].opname == "RETURN_GENERATOR"
+
 
 def should_skip_iterator_cleanup_before_return(
     instructions: list[Instruction],
@@ -765,10 +782,11 @@ def should_skip_iterator_cleanup_before_return(
         return False
 
     return_index = next_non_metadata_index(instructions, cursor + 1)
-    return (
-        return_index is not None
-        and instructions[return_index].opname in {"RETURN_VALUE", "RETURN_CONST"}
-    )
+    return return_index is not None and instructions[return_index].opname in {
+        "RETURN_VALUE",
+        "RETURN_CONST",
+    }
+
 
 def should_skip_swap_iterator_cleanup(
     instructions: list[Instruction],
@@ -783,10 +801,11 @@ def should_skip_swap_iterator_cleanup(
         return False
 
     return_index = next_non_metadata_index(instructions, pop_index + 1)
-    return (
-        return_index is not None
-        and instructions[return_index].opname in {"RETURN_VALUE", "RETURN_CONST"}
-    )
+    return return_index is not None and instructions[return_index].opname in {
+        "RETURN_VALUE",
+        "RETURN_CONST",
+    }
+
 
 def should_skip_range_cursor(
     decompiler: NativeDecompiler,
@@ -809,6 +828,7 @@ def should_skip_range_cursor(
         or decompiler.should_skip_loop_break_cleanup_pop(instructions, cursor)
     )
 
+
 def should_skip_unreachable_after_terminal(
     instructions: list[Instruction],
     cursor: int,
@@ -825,6 +845,7 @@ def should_skip_unreachable_after_terminal(
             return True
     return False
 
+
 def is_after_implicit_module_return(
     instructions: list[Instruction],
     cursor: int,
@@ -837,6 +858,7 @@ def is_after_implicit_module_return(
         return False
     previous = instructions[previous_index]
     return previous.opname == "RETURN_CONST" and previous.argval is None
+
 
 def should_skip_returning_with_cleanup_after_terminal(
     instructions: list[Instruction],
@@ -857,6 +879,7 @@ def should_skip_returning_with_cleanup_after_terminal(
         return None
     return skipped
 
+
 def previous_non_metadata_index(
     instructions: list[Instruction],
     cursor: int,
@@ -866,6 +889,7 @@ def previous_non_metadata_index(
             return cursor
         cursor -= 1
     return None
+
 
 def find_loaded_global_store_sources(instructions: list[Instruction]) -> list[str]:
     names: list[str] = []
@@ -880,6 +904,7 @@ def find_loaded_global_store_sources(instructions: list[Instruction]) -> list[st
             if name not in names:
                 names.append(name)
     return names
+
 
 def find_explicit_nonlocal_names(
     code: Any,
@@ -898,6 +923,7 @@ def find_explicit_nonlocal_names(
             names.append(name)
     return names
 
+
 def starts_global_store_chain(
     instructions: list[Instruction],
     start_index: int,
@@ -911,6 +937,7 @@ def starts_global_store_chain(
         return opname == "STORE_GLOBAL"
     return False
 
+
 def next_non_metadata_index(
     instructions: list[Instruction],
     start_index: int,
@@ -919,6 +946,7 @@ def next_non_metadata_index(
         if instructions[index].opname not in GLOBAL_CHAIN_PREFIX_OPS:
             return index
     return None
+
 
 def find_module_explicit_global_names(instructions: list[Instruction]) -> list[str]:
     names: list[str] = []
@@ -935,6 +963,7 @@ def find_module_explicit_global_names(instructions: list[Instruction]) -> list[s
         chain = []
     add_mixed_store_global_names(names, chain)
     return names
+
 
 def add_mixed_store_global_names(
     names: list[str],

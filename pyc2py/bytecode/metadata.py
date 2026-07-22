@@ -1,7 +1,9 @@
+from collections.abc import Sequence
 from dataclasses import dataclass, field
+
 from pyc2py.bytecode.instruction import Instruction
 from pyc2py.constants import MAX_CFG_EDGES
-from collections.abc import Sequence
+
 
 @dataclass(frozen=True, slots=True)
 class ExceptionTableEntry:
@@ -11,6 +13,7 @@ class ExceptionTableEntry:
     depth: int = 0
     lasti: bool = False
 
+
 @dataclass(slots=True)
 class ExceptionTableValidation:
     entry_count: int
@@ -19,6 +22,7 @@ class ExceptionTableValidation:
     @property
     def checks(self) -> tuple[str, ...]:
         return (f"exception table entry count: {self.entry_count}",)
+
 
 def parse_exception_table(
     data: bytes, max_entries: int = MAX_CFG_EDGES
@@ -49,6 +53,7 @@ def parse_exception_table(
         )
     raise ValueError("exception table exceeded local entry limit")
 
+
 def read_exception_varint(data: bytes, offset: int) -> tuple[int, int]:
     if offset >= len(data):
         raise ValueError("truncated exception table entry")
@@ -64,6 +69,7 @@ def read_exception_varint(data: bytes, offset: int) -> tuple[int, int]:
         offset += 1
 
     return value, offset
+
 
 def validate_exception_table(
     data: bytes,
@@ -92,6 +98,7 @@ def validate_exception_table(
         previous_start = entry.start_offset
 
     return ExceptionTableValidation(entry_count=len(entries), warnings=warnings)
+
 
 def validate_exception_entry(
     entry: ExceptionTableEntry,
@@ -127,10 +134,12 @@ def validate_exception_entry(
 
     return warnings
 
+
 @dataclass(frozen=True, slots=True)
 class LineEntry:
     offset: int
     line: int
+
 
 @dataclass(slots=True)
 class LineValidation:
@@ -140,6 +149,7 @@ class LineValidation:
     @property
     def checks(self) -> tuple[str, ...]:
         return (f"line entry count: {self.entry_count}",)
+
 
 def line_entries(instructions: list[Instruction]) -> tuple[LineEntry, ...]:
     entries: list[LineEntry] = []
@@ -152,6 +162,7 @@ def line_entries(instructions: list[Instruction]) -> tuple[LineEntry, ...]:
             LineEntry(offset=instruction.offset, line=instruction.starts_line)
         )
     return tuple(entries)
+
 
 def validate_line_entries(instructions: list[Instruction]) -> LineValidation:
     entries = line_entries(instructions)
@@ -170,10 +181,13 @@ def validate_line_entries(instructions: list[Instruction]) -> LineValidation:
 
     return LineValidation(entry_count=len(entries), warnings=warnings)
 
+
 IGNORABLE_OPS = frozenset({"CACHE", "SET_LINENO", "NOP"})
+
 
 def make_offset_index(instructions: Sequence[Instruction]) -> dict[int, int]:
     return {instruction.offset: index for index, instruction in enumerate(instructions)}
+
 
 def skip_ignorable_instructions(
     instructions: Sequence[Instruction],

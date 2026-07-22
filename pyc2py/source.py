@@ -4,6 +4,7 @@ import re
 import token
 import tokenize
 import warnings
+from collections.abc import Iterable
 from dataclasses import dataclass
 
 from pyc2py.astree import analyze_ast_shape
@@ -11,6 +12,7 @@ from pyc2py.constants import MAX_AST_NODES, MAX_SOURCE_LINE_LENGTH
 from pyc2py.decompiler.engine import decompile_native_source
 from pyc2py.decompiler.opcodes.values import EMPTY_SLICE_STEP_NAME
 from pyc2py.types import ProgressCallback, PycModule, emit_progress
+
 
 @dataclass(frozen=True, slots=True)
 class SourceValidation:
@@ -35,8 +37,10 @@ class SourceValidation:
             *self.compile_checks,
         )
 
+
 def compile_source(source: str, filename: str = "<pyc2py>") -> object:
     return compile(source, filename, "exec")
+
 
 def compile_source_checked(
     source: str,
@@ -47,15 +51,18 @@ def compile_source_checked(
         compiled = compile_source(source, filename)
     return compiled, tuple(format_compile_warning(warning) for warning in captured)
 
+
 def format_compile_warning(warning: warnings.WarningMessage) -> str:
     category = warning.category.__name__
     line_number = warning.lineno
     message = str(warning.message)
     return f"{category} at line {line_number}: {message}"
 
+
 def check_source_compiles(source: str, filename: str = "<pyc2py>") -> str | None:
     validation = validate_source(source, filename)
     return validation.error
+
 
 def validate_source(source: str, filename: str = "<pyc2py>") -> SourceValidation:
     line_count = count_source_lines(source)
@@ -96,6 +103,7 @@ def validate_source(source: str, filename: str = "<pyc2py>") -> SourceValidation
         warnings=(*formatting.warnings, *control_flow_warnings),
     )
 
+
 def make_compile_checks(compile_warnings: tuple[str, ...]) -> tuple[str, ...]:
     if not compile_warnings:
         return ("source compile warnings captured: 0",)
@@ -104,10 +112,12 @@ def make_compile_checks(compile_warnings: tuple[str, ...]) -> tuple[str, ...]:
         *(f"source compiler warning: {warning}" for warning in compile_warnings),
     )
 
+
 def count_source_lines(source: str) -> int:
     if not source:
         return 0
     return len(source.splitlines())
+
 
 def count_ast_nodes(tree: ast.AST, max_nodes: int = MAX_AST_NODES) -> int:
     if max_nodes < 1:
@@ -119,11 +129,13 @@ def count_ast_nodes(tree: ast.AST, max_nodes: int = MAX_AST_NODES) -> int:
             raise ValueError("source AST exceeds local node limit")
     return count
 
+
 def validate_control_flow(tree: ast.AST) -> tuple[str, ...]:
     return (
         *validate_unresolved_constant_branches(tree),
         *validate_bare_raise_contexts(tree),
     )
+
 
 def validate_unresolved_helpers(tree: ast.AST) -> tuple[str, ...]:
     errors: list[str] = []
@@ -138,6 +150,7 @@ def validate_unresolved_helpers(tree: ast.AST) -> tuple[str, ...]:
         errors.append(f"unresolved decompiler helper at line {line}: {node.id}")
     return tuple(errors)
 
+
 def validate_unresolved_constant_branches(tree: ast.AST) -> tuple[str, ...]:
     warnings: list[str] = []
     for node in ast.walk(tree):
@@ -150,6 +163,7 @@ def validate_unresolved_constant_branches(tree: ast.AST) -> tuple[str, ...]:
             f"constant None condition at line {line}; control flow still needs recovery"
         )
     return tuple(warnings)
+
 
 def validate_bare_raise_contexts(tree: ast.AST) -> tuple[str, ...]:
     warnings: list[str] = []
@@ -165,8 +179,7 @@ def validate_bare_raise_contexts(tree: ast.AST) -> tuple[str, ...]:
 
         if isinstance(node, ast.ExceptHandler):
             work.extend(
-                (child, True)
-                for child in reversed(list(ast.iter_child_nodes(node)))
+                (child, True) for child in reversed(list(ast.iter_child_nodes(node)))
             )
             continue
 
@@ -176,6 +189,7 @@ def validate_bare_raise_contexts(tree: ast.AST) -> tuple[str, ...]:
         )
     raise ValueError("source AST exceeds local node limit")
 
+
 def is_none_condition(test: ast.expr) -> bool:
     if isinstance(test, ast.Constant) and test.value is None:
         return True
@@ -183,10 +197,12 @@ def is_none_condition(test: ast.expr) -> bool:
         return isinstance(test.operand, ast.Constant) and test.operand.value is None
     return False
 
+
 @dataclass(frozen=True, slots=True)
 class SourceFormatValidation:
     checks: tuple[str, ...]
     warnings: tuple[str, ...]
+
 
 def validate_source_format(source: str) -> SourceFormatValidation:
     warnings: list[str] = []
@@ -210,12 +226,14 @@ def validate_source_format(source: str) -> SourceFormatValidation:
         )
     return SourceFormatValidation(checks=tuple(checks), warnings=tuple(warnings))
 
+
 def count_trailing_whitespace_lines(source: str) -> int:
     count = 0
     for line in source.splitlines():
         if line.rstrip(" \t") != line:
             count += 1
     return count
+
 
 def count_long_lines(source: str, max_length: int) -> int:
     if max_length < 1:
@@ -227,9 +245,11 @@ def count_long_lines(source: str, max_length: int) -> int:
             count += 1
     return count
 
+
 PRINT_RE = re.compile(r"^(?P<indent>\s*)print\s+(?P<value>.+)$")
 MULTILINE_LITERAL_LINE_LENGTH = 88
 EMPTY_SLICE_STEP_TEXT = f":{EMPTY_SLICE_STEP_NAME}"
+
 
 def emit_source(
     module: PycModule,
@@ -246,6 +266,7 @@ def emit_source(
         return native, "native", tuple(warnings)
 
     raise ValueError("native decompiler did not produce source")
+
 
 def try_native_decompile(
     module: PycModule,
@@ -289,16 +310,20 @@ def try_native_decompile(
         legacy_bytes_literals=uses_legacy_bytes_literals(module),
     )
 
-def add_report_warnings(warnings: list[str], items) -> None:
+
+def add_report_warnings(warnings: list[str], items: Iterable[str]) -> None:
     for item in items:
         list.append(warnings, item)
+
 
 def is_legacy_python(module: PycModule) -> bool:
     return module.header.version is not None and module.header.version < (3, 0)
 
+
 def uses_legacy_bytes_literals(module: PycModule) -> bool:
     version = module.header.version
     return version is not None and (2, 6) <= version < (3, 0)
+
 
 def format_readable_source(
     source: str,
@@ -332,6 +357,7 @@ def format_readable_source(
         normalized = format_legacy_bstr_assignments(normalized)
     return normalized + "\n"
 
+
 def format_source_line(line: str) -> str | list[str]:
     line = format_chained_assignment_targets(line)
     line = format_raw_f_string_backslashes(line)
@@ -349,6 +375,7 @@ def format_source_line(line: str) -> str | list[str]:
     line = format_nonfinite_assignment(line)
     line = format_power_operator_spacing(line)
     return format_empty_slice_step_markers(line)
+
 
 def apply_structural_source_spacing(lines: list[str]) -> list[str]:
     lines = remove_blank_after_definition_headers(lines)
@@ -368,6 +395,7 @@ def apply_structural_source_spacing(lines: list[str]) -> list[str]:
     lines = separate_top_level_assignment_after_call_blocks(lines)
     return separate_top_level_pass_if_blocks(lines)
 
+
 def format_spaced_source_line(line: str) -> str:
     line = format_raw_f_string_backslashes(line)
     line = format_f_string_quote_style(line)
@@ -375,11 +403,13 @@ def format_spaced_source_line(line: str) -> str:
     line = format_repeated_string_constant(line)
     return format_parameter_separator_spacing(line)
 
+
 def apply_legacy_source_formatters(source: str) -> str:
     source = format_legacy_class_constant_prints(source)
     source = format_legacy_redirected_constant_prints(source)
     source = format_mixed_legacy_redirected_print_spacing(source)
     return format_legacy_subscript_dict_source(source)
+
 
 def is_assignment_data_module(lines: list[str]) -> bool:
     body_lines = [
@@ -402,6 +432,7 @@ def is_assignment_data_module(lines: list[str]) -> bool:
         return False
     return all(is_assignment_data_statement(statement) for statement in module.body)
 
+
 def is_assignment_data_statement(statement: ast.stmt) -> bool:
     if isinstance(
         statement,
@@ -420,6 +451,7 @@ def is_assignment_data_statement(statement: ast.stmt) -> bool:
         return all(is_assignment_data_statement(item) for item in statement.body)
     return False
 
+
 def is_assignment_data_expression(value: ast.expr) -> bool:
     if isinstance(value, ast.Constant):
         return isinstance(value.value, str)
@@ -429,9 +461,11 @@ def is_assignment_data_expression(value: ast.expr) -> bool:
         return is_pprint_call(value)
     return False
 
+
 def is_pprint_call(value: ast.Call) -> bool:
     function = value.func
     return isinstance(function, ast.Attribute) and function.attr == "pprint"
+
 
 LEGACY_STRING_PRINT_RE = re.compile(
     r"^(?P<indent>\s*)print (?P<quote>['\"])(?P<value>[^'\"]*)(?P=quote)$"
@@ -450,6 +484,7 @@ LEGACY_BSTR_ASSIGNMENT_RE = re.compile(
     r"^(?P<indent>\s*)bstr = (?P<quote>['\"])(?P<value>[^'\"]*)(?P=quote)$"
 )
 
+
 def format_legacy_class_constant_prints(source: str) -> str:
     lines = source.splitlines()
     ranges = legacy_class_constant_print_ranges(lines)
@@ -461,6 +496,7 @@ def format_legacy_class_constant_prints(source: str) -> str:
         for index in range(start, end):
             formatted[index] = format_legacy_constant_print_line(formatted[index])
     return "\n".join(formatted)
+
 
 def legacy_class_constant_print_ranges(lines: list[str]) -> list[tuple[int, int]]:
     ranges: list[tuple[int, int]] = []
@@ -489,6 +525,7 @@ def legacy_class_constant_print_ranges(lines: list[str]) -> list[tuple[int, int]
         index += 1
     return ranges
 
+
 def block_end_index(lines: list[str], start: int, indent: int) -> int:
     index = start + 1
     while index < len(lines):
@@ -497,6 +534,7 @@ def block_end_index(lines: list[str], start: int, indent: int) -> int:
             return index
         index += 1
     return len(lines)
+
 
 def block_has_only_constant_legacy_prints(lines: list[str]) -> bool:
     saw_print = False
@@ -511,12 +549,14 @@ def block_has_only_constant_legacy_prints(lines: list[str]) -> bool:
             return False
     return saw_print
 
+
 def format_legacy_constant_print_line(line: str) -> str:
     match = LEGACY_STRING_PRINT_RE.match(line)
     if match is None:
         return line
     value = match.group("value").replace("\\", "\\\\").replace('"', '\\"')
     return f'{match.group("indent")}print("{value}")'
+
 
 def format_legacy_redirected_constant_prints(source: str) -> str:
     lines = source.splitlines()
@@ -525,8 +565,10 @@ def format_legacy_redirected_constant_prints(source: str) -> str:
     formatted = [format_legacy_redirected_constant_print_line(line) for line in lines]
     return "\n".join(formatted)
 
+
 def has_bare_legacy_string_print(lines: list[str]) -> bool:
     return any(LEGACY_STRING_PRINT_RE.match(line) is not None for line in lines)
+
 
 def format_legacy_redirected_constant_print_line(line: str) -> str:
     match = LEGACY_REDIRECTED_STRING_PRINT_RE.match(line)
@@ -535,6 +577,7 @@ def format_legacy_redirected_constant_print_line(line: str) -> str:
     value = match.group("value").replace("\\", "\\\\").replace('"', '\\"')
     return f'{match.group("indent")}print >> {match.group("target")}, "{value}"'
 
+
 def format_mixed_legacy_redirected_print_spacing(source: str) -> str:
     lines = source.splitlines()
     if not has_mixed_legacy_print_styles(lines):
@@ -542,10 +585,12 @@ def format_mixed_legacy_redirected_print_spacing(source: str) -> str:
     formatted = [format_compact_redirected_print_line(line) for line in lines]
     return "\n".join(formatted)
 
+
 def has_mixed_legacy_print_styles(lines: list[str]) -> bool:
     has_redirected = any(LEGACY_REDIRECTED_PRINT_RE.match(line) for line in lines)
     has_bare = any(is_bare_legacy_print_line(line) for line in lines)
     return has_redirected and has_bare
+
 
 def is_bare_legacy_print_line(line: str) -> bool:
     stripped = line.strip()
@@ -553,12 +598,14 @@ def is_bare_legacy_print_line(line: str) -> bool:
         stripped.startswith("print ") and not stripped.startswith("print >>")
     )
 
+
 def format_compact_redirected_print_line(line: str) -> str:
     match = LEGACY_REDIRECTED_PRINT_RE.match(line)
     if match is None:
         return line
     tail = match.group("tail") or ""
-    return f'{match.group("indent")}print >>{match.group("target")}{tail}'
+    return f"{match.group('indent')}print >>{match.group('target')}{tail}"
+
 
 def format_legacy_subscript_dict_source(source: str) -> str:
     lines = source.splitlines()
@@ -572,6 +619,7 @@ def format_legacy_subscript_dict_source(source: str) -> str:
     ]
     return "\n".join(formatted)
 
+
 def has_legacy_subscript_dict_shape(lines: list[str]) -> bool:
     has_dict_assignment = any(
         LEGACY_SIMPLE_DICT_ASSIGNMENT_RE.match(line) for line in lines
@@ -580,14 +628,15 @@ def has_legacy_subscript_dict_shape(lines: list[str]) -> bool:
     has_subscript_write = any("] =" in line for line in lines)
     return has_dict_assignment and has_subscript_read and has_subscript_write
 
+
 def format_legacy_subscript_dict_line(line: str) -> str:
     match = LEGACY_SIMPLE_DICT_ASSIGNMENT_RE.match(line)
     if match is None:
         return line
     return (
-        f'{match.group("indent")}{match.group("target")} = '
-        f'{{ {match.group("body")} }}'
+        f"{match.group('indent')}{match.group('target')} = {{ {match.group('body')} }}"
     )
+
 
 def format_legacy_bare_double_quoted_print_line(line: str) -> str:
     match = LEGACY_STRING_PRINT_RE.match(line)
@@ -596,9 +645,11 @@ def format_legacy_bare_double_quoted_print_line(line: str) -> str:
     value = match.group("value").replace("\\", "\\\\").replace('"', '\\"')
     return f'{match.group("indent")}print "{value}"'
 
+
 def format_legacy_bstr_assignments(source: str) -> str:
     lines = [format_legacy_bstr_assignment_line(line) for line in source.splitlines()]
     return "\n".join(lines)
+
 
 def format_legacy_bstr_assignment_line(line: str) -> str:
     match = LEGACY_BSTR_ASSIGNMENT_RE.match(line)
@@ -607,18 +658,24 @@ def format_legacy_bstr_assignment_line(line: str) -> str:
     value = match.group("value").replace("\\", "\\\\").replace('"', '\\"')
     return f'{match.group("indent")}bstr = b"{value}"'
 
+
 def format_empty_slice_step_markers(line: str) -> str:
     return line.replace(EMPTY_SLICE_STEP_TEXT, ":")
 
-def flatten_formatted_lines(lines: list[str]) -> list[str]:
+
+def flatten_formatted_lines(lines: list[str | list[str]]) -> list[str]:
     flattened: list[str] = []
     for line in lines:
+        if isinstance(line, list):
+            flattened.extend(line)
+            continue
         split = line.splitlines()
         if split:
             flattened.extend(split)
         else:
             flattened.append(line)
     return flattened
+
 
 def separate_module_docstring(lines: list[str]) -> list[str]:
     end_index = find_initial_module_docstring_end(lines)
@@ -627,6 +684,7 @@ def separate_module_docstring(lines: list[str]) -> list[str]:
     if not lines[end_index + 1].strip():
         return lines
     return [*lines[: end_index + 1], "", *lines[end_index + 1 :]]
+
 
 def expand_initial_module_docstring_tabs(lines: list[str]) -> list[str]:
     end_index = find_initial_module_docstring_end(lines)
@@ -637,12 +695,14 @@ def expand_initial_module_docstring_tabs(lines: list[str]) -> list[str]:
         for index, line in enumerate(lines)
     ]
 
+
 def expand_leading_tabs(line: str) -> str:
     stripped = line.lstrip("\t")
     leading = line[: len(line) - len(stripped)]
     if not leading:
         return line
     return f"{leading.expandtabs(8)}{stripped}"
+
 
 YIELD_PAREN_SAFE_EXPR_TYPES = (
     ast.Attribute,
@@ -655,6 +715,7 @@ YIELD_PAREN_SAFE_EXPR_TYPES = (
     ast.Subscript,
     ast.UnaryOp,
 )
+
 
 def format_yield_parentheses(line: str) -> str:
     indent = line[: len(line) - len(line.lstrip())]
@@ -671,12 +732,14 @@ def format_yield_parentheses(line: str) -> str:
         return line
     return f"{indent}yield {expression_text}"
 
+
 def format_raw_f_string_backslashes(line: str) -> str:
     return re.sub(
         r"(?<![A-Za-z])f'([^'\n\"]*\\\\[^'\n\"]*)'",
         replace_raw_f_string_backslashes,
         line,
     )
+
 
 def replace_raw_f_string_backslashes(match: re.Match[str]) -> str:
     content = match.group(1)
@@ -685,12 +748,14 @@ def replace_raw_f_string_backslashes(match: re.Match[str]) -> str:
     raw_content = content.replace("\\\\", "\\")
     return f'rf"{raw_content}"'
 
+
 def format_f_string_quote_style(line: str) -> str:
     return re.sub(
         r"(?<![A-Za-z])f'([^'\n\"]*)'",
         lambda match: replace_f_string_quote_style(line, match),
         line,
     )
+
 
 def replace_f_string_quote_style(line: str, match: re.Match[str]) -> str:
     content = match.group(1)
@@ -706,6 +771,7 @@ def replace_f_string_quote_style(line: str, match: re.Match[str]) -> str:
     if "{" in content and "}" in content and not stripped_suffix.startswith("*"):
         return f'f"""{content}"""'
     return f'f"{content}"'
+
 
 def format_nested_quote_f_string(line: str) -> str:
     replacements: list[tuple[int, int, str]] = []
@@ -740,6 +806,7 @@ def format_nested_quote_f_string(line: str) -> str:
         formatted = formatted[:start] + replacement + formatted[end:]
     return formatted
 
+
 def format_repeated_string_constant(line: str) -> str:
     match = re.fullmatch(
         r'(?P<prefix>\s*(?:\+ )?)(?P<quote>["\'])(?P<content>[^"\']{8,})(?P=quote)',
@@ -759,13 +826,15 @@ def format_repeated_string_constant(line: str) -> str:
         return line
 
     quote = match.group("quote")
-    return f'{match.group("prefix")}{quote}{half}{quote} * 2'
+    return f"{match.group('prefix')}{quote}{half}{quote} * 2"
+
 
 def is_double_quoted_f_string_start(token_info: tokenize.TokenInfo) -> bool:
     if token_info.type != getattr(token, "FSTRING_START", -1):
         return False
     lowered = token_info.string.lower()
     return "f" in lowered and lowered.endswith('"') and not lowered.endswith('"""')
+
 
 def find_matching_f_string_end(
     tokens: list[tokenize.TokenInfo],
@@ -782,6 +851,7 @@ def find_matching_f_string_end(
                 return index
     return None
 
+
 def triple_quote_nested_f_string_segment(segment: str) -> str | None:
     if not segment.endswith('"') or segment.startswith(('f"""', 'F"""')):
         return None
@@ -791,10 +861,12 @@ def triple_quote_nested_f_string_segment(segment: str) -> str | None:
         return None
     return f'{segment[:-1]}"""'.replace('f"', 'f"""', 1).replace('F"', 'F"""', 1)
 
+
 def has_nested_quoted_f_string_expression(segment: str) -> bool:
     return ('{"' in segment and '"}' in segment) or (
         "{'" in segment and "'}" in segment
     )
+
 
 def format_power_operator_spacing(line: str) -> str:
     if is_legacy_print_comprehension_line(line):
@@ -827,9 +899,11 @@ def format_power_operator_spacing(line: str) -> str:
         compacted = compacted[:start] + "**" + compacted[end:]
     return compacted
 
+
 def is_legacy_print_comprehension_line(line: str) -> bool:
     stripped = line.lstrip()
     return stripped.startswith("print [") and " for " in stripped
+
 
 def next_significant_token(
     tokens: list[tokenize.TokenInfo],
@@ -842,6 +916,7 @@ def next_significant_token(
             return None
         return current
     return None
+
 
 def format_division_product_precedence(line: str) -> str:
     indent = line[: len(line) - len(line.lstrip())]
@@ -866,6 +941,7 @@ def format_division_product_precedence(line: str) -> str:
     right = ast.unparse(value.right.right)
     return f"{indent}return {left} / (({power}) * {right})"
 
+
 def format_modulo_addition_precedence(line: str) -> str:
     statement = parse_single_statement(line)
     if statement is None:
@@ -874,6 +950,7 @@ def format_modulo_addition_precedence(line: str) -> str:
             return line
         return format_modulo_addition_nodes(line, expression)
     return format_modulo_addition_nodes(line, statement)
+
 
 def parse_legacy_print_expression(line: str) -> ast.expr | None:
     match = PRINT_RE.match(line)
@@ -887,6 +964,7 @@ def parse_legacy_print_expression(line: str) -> ast.expr | None:
     except SyntaxError:
         return None
     return expression.body
+
 
 def format_modulo_addition_nodes(line: str, root: ast.AST) -> str:
     for node in ast.walk(root):
@@ -902,6 +980,7 @@ def format_modulo_addition_nodes(line: str, root: ast.AST) -> str:
             line = line.replace(old_text, new_text, 1)
     return line
 
+
 NONFINITE_ASSIGNMENT_REPLACEMENTS = {
     "(1e309-1e309)": "1e300 * 1e300 * 0",
     "-(1e309-1e309)": "-1e300 * 1e300 * 0",
@@ -909,6 +988,7 @@ NONFINITE_ASSIGNMENT_REPLACEMENTS = {
     "-1e309": "-1e300 * 1e300",
 }
 NONFINITE_FLOAT_TEXT_VALUES = frozenset({"nan", "-nan", "inf", "-inf"})
+
 
 def format_nonfinite_assignment(line: str) -> str:
     if "=" not in line:
@@ -920,7 +1000,9 @@ def format_nonfinite_assignment(line: str) -> str:
         return line
     return f"{prefix}= {replacement}"
 
+
 MIN_HEX_INT_LITERAL = 0x80000000
+
 
 def format_large_negative_integer_assignment(line: str) -> str:
     indent = line[: len(line) - len(line.lstrip())]
@@ -943,12 +1025,14 @@ def format_large_negative_integer_assignment(line: str) -> str:
     target = format_assignment_targets(statement.targets)
     return f"{indent}{target} = -0x{abs(value):x}"
 
+
 def negative_integer_constant(value: ast.expr) -> int | None:
     if isinstance(value, ast.UnaryOp) and isinstance(value.op, ast.USub):
         operand = value.operand
         if isinstance(operand, ast.Constant) and isinstance(operand.value, int):
             return -operand.value
     return None
+
 
 def find_initial_module_docstring_end(lines: list[str]) -> int | None:
     if not lines:
@@ -966,11 +1050,13 @@ def find_initial_module_docstring_end(lines: list[str]) -> int | None:
             return index
     return None
 
+
 def initial_docstring_delimiter(line: str) -> str | None:
     for delimiter in ('"""', "'''"):
         if line.startswith(delimiter):
             return delimiter
     return None
+
 
 def add_top_level_definition_spacing(lines: list[str]) -> list[str]:
     spaced: list[str] = []
@@ -1008,6 +1094,7 @@ def add_top_level_definition_spacing(lines: list[str]) -> list[str]:
         )
     return spaced
 
+
 def separate_nested_definition_blocks(lines: list[str]) -> list[str]:
     spaced: list[str] = []
     active_definition_indents: list[int] = []
@@ -1026,6 +1113,7 @@ def separate_nested_definition_blocks(lines: list[str]) -> list[str]:
         if stripped and is_definition_header(stripped):
             active_definition_indents.append(count_leading_whitespace(line))
     return spaced
+
 
 def separate_top_level_multiline_literal_assignments(lines: list[str]) -> list[str]:
     spaced: list[str] = []
@@ -1049,10 +1137,12 @@ def separate_top_level_multiline_literal_assignments(lines: list[str]) -> list[s
             closing_indent = ""
     return spaced
 
+
 def starts_top_level_multiline_literal_assignment(line: str) -> bool:
     if line.startswith((" ", "\t")):
         return False
     return starts_multiline_literal_assignment(line)
+
 
 def starts_top_level_literal_assignment_after_plain_assignment(
     line: str,
@@ -1064,9 +1154,11 @@ def starts_top_level_literal_assignment_after_plain_assignment(
     previous = previous_nonblank_line(previous_lines)
     return previous is not None and is_top_level_plain_assignment(previous)
 
+
 def starts_multiline_literal_assignment(line: str) -> bool:
     stripped = line.strip()
     return " = " in stripped and stripped.endswith(("{", "[", "("))
+
 
 def expected_literal_closing_line(line: str) -> str:
     stripped = line.strip()
@@ -1078,6 +1170,7 @@ def expected_literal_closing_line(line: str) -> str:
         return ")"
     return ""
 
+
 def separate_consecutive_multiline_literal_assignments(lines: list[str]) -> list[str]:
     spaced: list[str] = []
     for line in lines:
@@ -1085,6 +1178,7 @@ def separate_consecutive_multiline_literal_assignments(lines: list[str]) -> list
             add_one_blank_line_before(spaced)
         spaced.append(line)
     return spaced
+
 
 def starts_consecutive_multiline_literal_assignment(
     line: str,
@@ -1100,6 +1194,7 @@ def starts_consecutive_multiline_literal_assignment(
         return False
     return count_leading_whitespace(line) == count_leading_whitespace(previous)
 
+
 def separate_top_level_complex_assignment_blocks(lines: list[str]) -> list[str]:
     spaced: list[str] = []
     for line in lines:
@@ -1107,6 +1202,7 @@ def separate_top_level_complex_assignment_blocks(lines: list[str]) -> list[str]:
             add_one_blank_line_before(spaced)
         spaced.append(line)
     return spaced
+
 
 def starts_top_level_complex_assignment_boundary(
     line: str,
@@ -1126,6 +1222,7 @@ def starts_top_level_complex_assignment_boundary(
         return False
     return is_top_level_assignment_statement(line) or is_top_level_global_line(line)
 
+
 def is_chained_dict_assignment(line: str) -> bool:
     if not is_top_level_nonblank_line(line):
         return False
@@ -1133,6 +1230,7 @@ def is_chained_dict_assignment(line: str) -> bool:
     if not isinstance(statement, ast.Assign) or len(statement.targets) < 2:
         return False
     return isinstance(statement.value, ast.Dict)
+
 
 def is_complex_chained_assignment(line: str) -> bool:
     if not is_top_level_nonblank_line(line):
@@ -1143,6 +1241,7 @@ def is_complex_chained_assignment(line: str) -> bool:
     if any(isinstance(target, ast.Subscript) for target in statement.targets):
         return False
     return any(not isinstance(target, ast.Name) for target in statement.targets)
+
 
 def previous_assignment_group_follows_global_declaration(lines: list[str]) -> bool:
     index = len(lines) - 1
@@ -1157,10 +1256,12 @@ def previous_assignment_group_follows_global_declaration(lines: list[str]) -> bo
         return is_top_level_global_line(line)
     return False
 
+
 def is_top_level_global_line(line: str) -> bool:
     if not is_top_level_nonblank_line(line):
         return False
     return isinstance(parse_single_statement(line), ast.Global)
+
 
 def hoist_top_level_global_declarations(lines: list[str]) -> list[str]:
     hoisted: list[str] = []
@@ -1175,6 +1276,7 @@ def hoist_top_level_global_declarations(lines: list[str]) -> list[str]:
         hoisted.append(line)
     return hoisted
 
+
 def preceding_assignment_group_start(lines: list[str]) -> int | None:
     index = len(lines) - 1
     while index >= 0 and not lines[index].strip():
@@ -1186,6 +1288,7 @@ def preceding_assignment_group_start(lines: list[str]) -> int | None:
         index -= 1
     return index
 
+
 def separate_top_level_compound_blocks(lines: list[str]) -> list[str]:
     spaced: list[str] = []
     for line in lines:
@@ -1193,6 +1296,7 @@ def separate_top_level_compound_blocks(lines: list[str]) -> list[str]:
             add_one_blank_line_before(spaced)
         spaced.append(line)
     return spaced
+
 
 def starts_top_level_compound_block(line: str, previous_lines: list[str]) -> bool:
     stripped = line.strip()
@@ -1211,6 +1315,7 @@ def starts_top_level_compound_block(line: str, previous_lines: list[str]) -> boo
         return not (stripped.startswith("if ") and previous_header.startswith("if "))
     return not is_single_line_assignment(previous)
 
+
 def is_single_line_assignment(line: str) -> bool:
     try:
         module = ast.parse(line)
@@ -1219,6 +1324,7 @@ def is_single_line_assignment(line: str) -> bool:
     if len(module.body) != 1:
         return False
     return isinstance(module.body[0], (ast.Assign, ast.AnnAssign, ast.AugAssign))
+
 
 def previous_top_level_compound_header(lines: list[str]) -> str:
     for line in reversed(lines):
@@ -1231,6 +1337,7 @@ def previous_top_level_compound_header(lines: list[str]) -> str:
             return stripped
         return ""
     return ""
+
 
 def is_compound_block_header(stripped: str) -> bool:
     if not stripped.endswith(":"):
@@ -1248,6 +1355,7 @@ def is_compound_block_header(stripped: str) -> bool:
         )
     )
 
+
 def separate_top_level_statement_after_compound_blocks(lines: list[str]) -> list[str]:
     spaced: list[str] = []
     for line in lines:
@@ -1255,6 +1363,7 @@ def separate_top_level_statement_after_compound_blocks(lines: list[str]) -> list
             add_one_blank_line_before(spaced)
         spaced.append(line)
     return spaced
+
 
 def starts_top_level_statement_after_compound_block(
     line: str,
@@ -1275,6 +1384,7 @@ def starts_top_level_statement_after_compound_block(
         return False
     return not previous_top_level_compound_header(previous_lines).startswith("if ")
 
+
 def is_empty_unpack_assignment(line: str) -> bool:
     statement = parse_single_statement(line)
     if not isinstance(statement, ast.Assign):
@@ -1283,6 +1393,7 @@ def is_empty_unpack_assignment(line: str) -> bool:
         isinstance(target, (ast.List, ast.Tuple)) and not target.elts
         for target in statement.targets
     )
+
 
 def separate_nested_statement_after_compound_blocks(lines: list[str]) -> list[str]:
     spaced: list[str] = []
@@ -1309,6 +1420,7 @@ def separate_nested_statement_after_compound_blocks(lines: list[str]) -> list[st
 
     return spaced
 
+
 def pop_ended_compound_headers(
     active_headers: list[tuple[int, str]],
     indent: int,
@@ -1321,6 +1433,7 @@ def pop_ended_compound_headers(
     while active_headers and indent <= active_headers[-1][0]:
         ended_headers.append(active_headers.pop())
     return ended_headers
+
 
 def starts_nested_statement_after_compound_block(
     line: str,
@@ -1353,11 +1466,13 @@ def starts_nested_statement_after_compound_block(
         and not header.startswith(("try:", "if "))
     )
 
+
 def is_inside_active_block(
     active_headers: list[tuple[int, str]],
     current_indent: int,
 ) -> bool:
     return bool(active_headers) and current_indent > active_headers[-1][0]
+
 
 def matching_ended_header(
     ended_headers: list[tuple[int, str]], indent: int
@@ -1367,6 +1482,7 @@ def matching_ended_header(
             return header_indent, header
     return None
 
+
 def separate_top_level_statement_after_raise_blocks(lines: list[str]) -> list[str]:
     spaced: list[str] = []
     for line in lines:
@@ -1374,6 +1490,7 @@ def separate_top_level_statement_after_raise_blocks(lines: list[str]) -> list[st
             add_one_blank_line_before(spaced)
         spaced.append(line)
     return spaced
+
 
 def starts_top_level_statement_after_raise_block(
     line: str, previous_lines: list[str]
@@ -1384,6 +1501,7 @@ def starts_top_level_statement_after_raise_block(
     previous = previous_nonblank_line(previous_lines)
     return previous is not None and is_raise_statement(previous)
 
+
 def separate_top_level_subscript_operation_blocks(lines: list[str]) -> list[str]:
     spaced: list[str] = []
     for line in lines:
@@ -1391,6 +1509,7 @@ def separate_top_level_subscript_operation_blocks(lines: list[str]) -> list[str]
             add_one_blank_line_before(spaced)
         spaced.append(line)
     return spaced
+
 
 def starts_top_level_subscript_operation_block(
     line: str, previous_lines: list[str]
@@ -1402,6 +1521,7 @@ def starts_top_level_subscript_operation_block(
     if previous is None:
         return False
     return is_raise_statement(previous) or is_top_level_subscript_delete(previous)
+
 
 def is_top_level_subscript_operation(line: str) -> bool:
     if not is_top_level_nonblank_line(line):
@@ -1415,6 +1535,7 @@ def is_top_level_subscript_operation(line: str) -> bool:
         return any(isinstance(target, ast.Subscript) for target in statement.targets)
     return False
 
+
 def is_top_level_subscript_delete(line: str) -> bool:
     if not is_top_level_nonblank_line(line):
         return False
@@ -1423,10 +1544,12 @@ def is_top_level_subscript_delete(line: str) -> bool:
         isinstance(target, ast.Subscript) for target in statement.targets
     )
 
+
 def is_raise_statement(line: str) -> bool:
     if not is_top_level_nonblank_line(line):
         return False
     return isinstance(parse_single_statement(line), ast.Raise)
+
 
 def separate_top_level_subscript_delete_object_blocks(lines: list[str]) -> list[str]:
     spaced: list[str] = []
@@ -1435,6 +1558,7 @@ def separate_top_level_subscript_delete_object_blocks(lines: list[str]) -> list[
             add_one_blank_line_before(spaced)
         spaced.append(line)
     return spaced
+
 
 def starts_top_level_subscript_delete_object_block(
     line: str, previous_lines: list[str]
@@ -1452,6 +1576,7 @@ def starts_top_level_subscript_delete_object_block(
     earlier_root = subscript_delete_root_name(earlier)
     return earlier_root is not None and earlier_root != current_root
 
+
 def subscript_delete_root_name(line: str) -> str | None:
     if not is_top_level_nonblank_line(line):
         return None
@@ -1463,6 +1588,7 @@ def subscript_delete_root_name(line: str) -> str | None:
         return None
     return subscript_root_name(target.value)
 
+
 def subscript_root_name(value: ast.expr) -> str | None:
     if isinstance(value, ast.Name):
         return value.id
@@ -1472,6 +1598,7 @@ def subscript_root_name(value: ast.expr) -> str | None:
         return subscript_root_name(value.value)
     return None
 
+
 def separate_top_level_assignment_after_subscript_blocks(lines: list[str]) -> list[str]:
     spaced: list[str] = []
     for line in lines:
@@ -1479,6 +1606,7 @@ def separate_top_level_assignment_after_subscript_blocks(lines: list[str]) -> li
             add_one_blank_line_before(spaced)
         spaced.append(line)
     return spaced
+
 
 def starts_top_level_assignment_after_subscript_block(
     line: str, previous_lines: list[str]
@@ -1492,6 +1620,7 @@ def starts_top_level_assignment_after_subscript_block(
     previous = previous_nonblank_line(previous_lines)
     return previous is not None and is_top_level_subscript_assignment(previous)
 
+
 def is_top_level_plain_assignment(line: str) -> bool:
     if not is_top_level_nonblank_line(line):
         return False
@@ -1499,6 +1628,7 @@ def is_top_level_plain_assignment(line: str) -> bool:
     if not isinstance(statement, ast.Assign):
         return False
     return all(isinstance(target, ast.Name) for target in statement.targets)
+
 
 def is_top_level_subscript_assignment(line: str) -> bool:
     if not is_top_level_nonblank_line(line):
@@ -1508,6 +1638,7 @@ def is_top_level_subscript_assignment(line: str) -> bool:
         return False
     return any(isinstance(target, ast.Subscript) for target in statement.targets)
 
+
 def is_top_level_standalone_f_string_expression(line: str) -> bool:
     if not is_top_level_nonblank_line(line):
         return False
@@ -1516,6 +1647,7 @@ def is_top_level_standalone_f_string_expression(line: str) -> bool:
         statement.value, ast.JoinedStr
     )
 
+
 def separate_top_level_call_statement_blocks(lines: list[str]) -> list[str]:
     spaced: list[str] = []
     for line in lines:
@@ -1523,6 +1655,7 @@ def separate_top_level_call_statement_blocks(lines: list[str]) -> list[str]:
             add_one_blank_line_before(spaced)
         spaced.append(line)
     return spaced
+
 
 def starts_top_level_call_statement_block(line: str, previous_lines: list[str]) -> bool:
     starts_block = False
@@ -1537,16 +1670,16 @@ def starts_top_level_call_statement_block(line: str, previous_lines: list[str]) 
     if is_empty_print_call_statement(line):
         return starts_block
     if is_print_call_statement(line) and is_top_level_call_statement(previous):
-        return (
-            not is_simple_name_call_statement(previous)
-            and not is_print_call_statement(previous)
-        )
+        return not is_simple_name_call_statement(
+            previous
+        ) and not is_print_call_statement(previous)
     if previous.startswith((" ", "\t")):
         starts_block = not (
             is_print_call_statement(line)
             and previous_top_level_compound_header(previous_lines).startswith("if ")
         )
     return starts_block
+
 
 def starts_call_after_assignment_block(
     line: str,
@@ -1565,6 +1698,7 @@ def starts_call_after_assignment_block(
         and not is_print_call_statement(line)
     )
 
+
 def starts_print_after_subscript_assignment_group(
     line: str,
     previous_lines: list[str],
@@ -1580,6 +1714,7 @@ def starts_print_after_subscript_assignment_group(
         and is_top_level_subscript_assignment(earlier)
     )
 
+
 def starts_labelled_print_after_assignment_group(
     line: str,
     previous_lines: list[str],
@@ -1587,6 +1722,7 @@ def starts_labelled_print_after_assignment_group(
     if not is_labelled_print_call_statement(line):
         return False
     return count_preceding_top_level_assignments(previous_lines) >= 4
+
 
 def count_preceding_top_level_assignments(lines: list[str]) -> int:
     count = 0
@@ -1598,11 +1734,13 @@ def count_preceding_top_level_assignments(lines: list[str]) -> int:
         count += 1
     return count
 
+
 def is_top_level_call_statement(line: str) -> bool:
     if not is_top_level_nonblank_line(line):
         return False
     statement = parse_single_statement(line)
     return isinstance(statement, ast.Expr) and isinstance(statement.value, ast.Call)
+
 
 def is_simple_name_call_statement(line: str) -> bool:
     statement = parse_single_statement(line)
@@ -1610,12 +1748,14 @@ def is_simple_name_call_statement(line: str) -> bool:
         return False
     return isinstance(statement.value.func, ast.Name)
 
+
 def is_print_call_statement(line: str) -> bool:
     statement = parse_single_statement(line)
     if not isinstance(statement, ast.Expr) or not isinstance(statement.value, ast.Call):
         return False
     function = statement.value.func
     return isinstance(function, ast.Name) and function.id == "print"
+
 
 def is_empty_print_call_statement(line: str) -> bool:
     statement = parse_single_statement(line)
@@ -1629,6 +1769,7 @@ def is_empty_print_call_statement(line: str) -> bool:
         and not statement.value.keywords
     )
 
+
 def is_print_comprehension_call_statement(line: str) -> bool:
     statement = parse_single_statement(line)
     if not isinstance(statement, ast.Expr) or not isinstance(statement.value, ast.Call):
@@ -1638,10 +1779,12 @@ def is_print_comprehension_call_statement(line: str) -> bool:
         return False
     return any(is_comprehension_expression(arg) for arg in statement.value.args)
 
+
 def is_comprehension_expression(value: ast.expr) -> bool:
     return isinstance(
         value, (ast.DictComp, ast.GeneratorExp, ast.ListComp, ast.SetComp)
     )
+
 
 def is_labelled_print_call_statement(line: str) -> bool:
     statement = parse_single_statement(line)
@@ -1657,6 +1800,7 @@ def is_labelled_print_call_statement(line: str) -> bool:
         and isinstance(args[0].value, str)
     )
 
+
 def is_method_call_on_previous_call_assignment(line: str, previous: str) -> bool:
     assigned_name = call_assignment_target_name(previous)
     if assigned_name is None:
@@ -1671,6 +1815,7 @@ def is_method_call_on_previous_call_assignment(line: str, previous: str) -> bool
     root_name = attribute_root_name(function.value)
     return root_name == assigned_name
 
+
 def call_assignment_target_name(line: str) -> str | None:
     statement = parse_single_statement(line)
     if not isinstance(statement, ast.Assign) or len(statement.targets) != 1:
@@ -1682,6 +1827,7 @@ def call_assignment_target_name(line: str) -> str | None:
         return None
     return target.id
 
+
 def attribute_root_name(value: ast.expr) -> str | None:
     if isinstance(value, ast.Name):
         return value.id
@@ -1690,6 +1836,7 @@ def attribute_root_name(value: ast.expr) -> str | None:
     if isinstance(value, ast.Subscript):
         return attribute_root_name(value.value)
     return None
+
 
 def parse_single_statement(line: str) -> ast.stmt | None:
     try:
@@ -1700,6 +1847,7 @@ def parse_single_statement(line: str) -> ast.stmt | None:
         return None
     return module.body[0]
 
+
 def separate_top_level_assignment_after_call_blocks(lines: list[str]) -> list[str]:
     spaced: list[str] = []
     for line in lines:
@@ -1707,6 +1855,7 @@ def separate_top_level_assignment_after_call_blocks(lines: list[str]) -> list[st
             add_one_blank_line_before(spaced)
         spaced.append(line)
     return spaced
+
 
 def starts_top_level_assignment_after_call_block(
     line: str, previous_lines: list[str]
@@ -1724,10 +1873,12 @@ def starts_top_level_assignment_after_call_block(
         )
     )
 
+
 def is_top_level_assignment_statement(line: str) -> bool:
     if not is_top_level_nonblank_line(line):
         return False
     return is_single_line_assignment(line)
+
 
 def separate_top_level_pass_if_blocks(lines: list[str]) -> list[str]:
     spaced: list[str] = []
@@ -1736,6 +1887,7 @@ def separate_top_level_pass_if_blocks(lines: list[str]) -> list[str]:
             add_one_blank_line_before(spaced)
         spaced.append(line)
     return spaced
+
 
 def starts_top_level_pass_if_block(lines: list[str], index: int) -> bool:
     line = lines[index]
@@ -1746,11 +1898,13 @@ def starts_top_level_pass_if_block(lines: list[str], index: int) -> bool:
         return False
     return lines[index + 1] == "    pass"
 
+
 def add_one_blank_line_before(lines: list[str]) -> None:
     if not lines:
         return
     if count_trailing_blank_lines(lines) == 0:
         lines.append("")
+
 
 def remove_blank_after_definition_headers(lines: list[str]) -> list[str]:
     cleaned: list[str] = []
@@ -1758,6 +1912,7 @@ def remove_blank_after_definition_headers(lines: list[str]) -> list[str]:
         if not should_drop_definition_header_blank(lines, index):
             cleaned.append(line)
     return cleaned
+
 
 def should_drop_definition_header_blank(lines: list[str], index: int) -> bool:
     if lines[index].strip():
@@ -1779,16 +1934,20 @@ def should_drop_definition_header_blank(lines: list[str], index: int) -> bool:
 
     return is_definition_header(following.strip())
 
+
 def is_definition_header(stripped: str) -> bool:
     return stripped.startswith(("def ", "async def ", "class ")) and stripped.endswith(
         ":"
     )
 
+
 def is_class_header(stripped: str) -> bool:
     return stripped.startswith("class ") and stripped.endswith(":")
 
+
 def count_leading_whitespace(line: str) -> int:
     return len(line) - len(line.lstrip(" \t"))
+
 
 def add_two_blank_lines_before(lines: list[str]) -> None:
     if not lines:
@@ -1798,27 +1957,34 @@ def add_two_blank_lines_before(lines: list[str]) -> None:
     blank_count = count_trailing_blank_lines(lines)
     lines.extend("" for _index in range(2 - blank_count))
 
+
 def is_top_level_spacing_line(line: str) -> bool:
     return is_top_level_definition_line(line) or is_top_level_decorator_line(line)
+
 
 def is_top_level_definition_line(line: str) -> bool:
     if line.startswith((" ", "\t")):
         return False
     return line.startswith(("def ", "async def ", "class "))
 
+
 def is_top_level_function_line(line: str) -> bool:
     if line.startswith((" ", "\t")):
         return False
     return line.startswith(("def ", "async def "))
 
+
 def is_top_level_nonblank_line(line: str) -> bool:
     return bool(line.strip()) and not line.startswith((" ", "\t"))
+
 
 def is_top_level_decorator_line(line: str) -> bool:
     return line.startswith("@")
 
+
 def previous_line_is_decorator(lines: list[str]) -> bool:
     return bool(lines) and is_top_level_decorator_line(lines[-1])
+
 
 def previous_content_is_initial_module_docstring(lines: list[str]) -> bool:
     trimmed = list(lines)
@@ -1829,6 +1995,7 @@ def previous_content_is_initial_module_docstring(lines: list[str]) -> bool:
 
     docstring_end = find_initial_module_docstring_end(trimmed)
     return docstring_end == len(trimmed) - 1
+
 
 def is_top_level_statement_after_block(line: str, previous_lines: list[str]) -> bool:
     stripped = line.strip()
@@ -1842,16 +2009,19 @@ def is_top_level_statement_after_block(line: str, previous_lines: list[str]) -> 
         return False
     return previous.startswith((" ", "\t"))
 
+
 def is_block_continuation_line(stripped: str) -> bool:
     if stripped.startswith((")", "]", "}")):
         return True
     return stripped.startswith(("elif ", "else:", "except", "finally:"))
+
 
 def previous_nonblank_line(lines: list[str]) -> str | None:
     for line in reversed(lines):
         if line.strip():
             return line
     return None
+
 
 def previous_two_nonblank_lines(lines: list[str]) -> tuple[str | None, str | None]:
     found: list[str] = []
@@ -1864,6 +2034,7 @@ def previous_two_nonblank_lines(lines: list[str]) -> tuple[str | None, str | Non
         return found[0], None
     return None, None
 
+
 def count_trailing_blank_lines(lines: list[str]) -> int:
     count = 0
     for line in reversed(lines):
@@ -1871,6 +2042,7 @@ def count_trailing_blank_lines(lines: list[str]) -> int:
             return count
         count += 1
     return count
+
 
 def update_multiline_string_state(stripped: str, in_string: bool) -> bool:
     if not stripped:
@@ -1883,6 +2055,7 @@ def update_multiline_string_state(stripped: str, in_string: bool) -> bool:
         if count % 2:
             return not in_string
     return in_string
+
 
 def normalize_string_quotes(source: str, *, prefer_single: bool = False) -> str:
     try:
@@ -1903,6 +2076,7 @@ def normalize_string_quotes(source: str, *, prefer_single: bool = False) -> str:
         line = lines[line_index]
         lines[line_index] = line[:start_column] + normalized + line[end_column:]
     return "".join(lines).rstrip()
+
 
 def collect_string_quote_replacements(
     source: str,
@@ -1933,10 +2107,12 @@ def collect_string_quote_replacements(
             replacements.append((token_info.start, token_info.end, normalized))
     return replacements
 
+
 def should_normalize_string_token(f_string_stack: list[str]) -> bool:
     if not f_string_stack:
         return True
     return is_triple_quoted_f_string_start(f_string_stack[-1])
+
 
 def is_subscript_assignment_value_token(token_info: tokenize.TokenInfo) -> bool:
     line = token_info.line
@@ -1946,9 +2122,11 @@ def is_subscript_assignment_value_token(token_info: tokenize.TokenInfo) -> bool:
     target = line[:assignment_index].rstrip()
     return target.endswith("]") and "[" in target
 
+
 def is_triple_quoted_f_string_start(start_token: str) -> bool:
     lowered = start_token.lower()
     return "f" in lowered and start_token.endswith(('"""', "'''"))
+
 
 def normalize_string_token(token: str, *, prefer_single: bool = False) -> str:
     prefix, body = split_string_prefix(token)
@@ -1965,12 +2143,14 @@ def normalize_string_token(token: str, *, prefer_single: bool = False) -> str:
         return token
     return format_literal_string_token(prefix, value, prefer_single) or token
 
+
 def should_preserve_string_token(lowered_prefix: str, body: str) -> bool:
     return (
         "r" in lowered_prefix
         or body.startswith(('"""', "'''"))
         or not body.startswith(("'", '"'))
     )
+
 
 def format_literal_string_token(
     prefix: str,
@@ -1989,10 +2169,12 @@ def format_literal_string_token(
         return format_bytes_string_token(value)
     return None
 
+
 def format_single_quoted_string_token(prefix: str, value: str) -> str:
     if "'" in value and '"' not in value:
         return f'{prefix}"{escape_string_value(value)}"'
     return f"{prefix}'{escape_single_quoted_string_value(value)}'"
+
 
 def format_raw_f_string_token(prefix: str, body: str) -> str | None:
     if "r" in prefix.lower():
@@ -2010,6 +2192,7 @@ def format_raw_f_string_token(prefix: str, body: str) -> str | None:
         return None
     raw_content = content.replace("\\\\", "\\")
     return f'r{prefix}"{raw_content}"'
+
 
 def escape_single_quoted_string_value(value: str) -> str:
     parts: list[str] = []
@@ -2031,12 +2214,14 @@ def escape_single_quoted_string_value(value: str) -> str:
             parts.append(character)
     return "".join(parts)
 
+
 def split_string_prefix(token: str) -> tuple[str, str]:
     index = 0
     for index, character in enumerate(token):
         if character in ("'", '"'):
             return token[:index], token[index:]
     return "", token
+
 
 def format_bytes_string_token(value: bytes) -> str:
     return f'b"{escape_bytes_value(value)}"'
@@ -2061,6 +2246,7 @@ def escape_bytes_value(value: bytes) -> str:
             parts.append(f"\\x{byte:02x}")
     return "".join(parts)
 
+
 def escape_string_value(value: str) -> str:
     parts: list[str] = []
     for character in value:
@@ -2081,6 +2267,7 @@ def escape_string_value(value: str) -> str:
             parts.append(character)
     return "".join(parts)
 
+
 def format_chained_assignment_targets(line: str) -> str:
     indent = line[: len(line) - len(line.lstrip())]
     statement = parse_single_statement(line)
@@ -2095,12 +2282,12 @@ def format_chained_assignment_targets(line: str) -> str:
     target = format_assignment_targets(statement.targets)
     return f"{indent}{target} = {ast.unparse(statement.value)}"
 
+
 def format_single_assignment_target(indent: str, statement: ast.Assign) -> str | None:
     target = statement.targets[0]
     if isinstance(target, ast.Tuple) and len(target.elts) == 1:
         return (
-            f"{indent}({ast.unparse(target.elts[0])},) = "
-            f"{ast.unparse(statement.value)}"
+            f"{indent}({ast.unparse(target.elts[0])},) = {ast.unparse(statement.value)}"
         )
     if isinstance(target, ast.List):
         return format_single_unpack_assignment(indent, target, statement.value)
@@ -2115,6 +2302,7 @@ def format_single_assignment_target(indent: str, statement: ast.Assign) -> str |
         )
     return None
 
+
 def format_parameter_separator_spacing(line: str) -> str:
     if ",**" not in line:
         return line
@@ -2127,12 +2315,14 @@ def format_parameter_separator_spacing(line: str) -> str:
         return line
     return line.replace(",**", ", **")
 
+
 def contains_keyword_unpack_call(statement: ast.stmt) -> bool:
     return any(
         isinstance(node, ast.Call)
         and any(keyword.arg is None for keyword in node.keywords)
         for node in ast.walk(statement)
     )
+
 
 def format_single_unpack_assignment(
     indent: str,
@@ -2145,14 +2335,17 @@ def format_single_unpack_assignment(
         return f"{indent}({ast.unparse(target.elts[0])},) = {ast.unparse(value)}"
     return f"{indent}{format_sequence_items(target)} = {ast.unparse(value)}"
 
+
 def format_sequence_items(value: ast.List | ast.Tuple) -> str:
     items = [ast.unparse(item) for item in value.elts]
     if len(items) == 1:
         return f"{items[0]},"
     return ", ".join(items)
 
+
 def has_complex_tuple_target(value: ast.Tuple) -> bool:
     return any(not isinstance(item, ast.Name) for item in value.elts)
+
 
 def format_assignment_target(
     target: ast.expr,
@@ -2170,6 +2363,7 @@ def format_assignment_target(
         return ast.unparse(target)
     return ast.unparse(target)
 
+
 def format_assignment_targets(targets: list[ast.expr]) -> str:
     target_parts: list[str] = []
     previous_target: ast.expr | None = None
@@ -2184,6 +2378,7 @@ def format_assignment_targets(targets: list[ast.expr]) -> str:
         previous_target = target
     return " = ".join(target_parts)
 
+
 def should_render_chained_list_as_tuple(
     target: ast.List,
     previous_target: ast.expr | None,
@@ -2194,6 +2389,7 @@ def should_render_chained_list_as_tuple(
     if len(target.elts) != 2:
         return True
     return total_targets == 2 and not isinstance(previous_target, ast.Name)
+
 
 def separate_top_level_imports(lines: list[str]) -> list[str]:
     import_start = first_top_level_import_group_start(lines)
@@ -2214,6 +2410,7 @@ def separate_top_level_imports(lines: list[str]) -> list[str]:
         return lines
     return [*lines[:import_end], "", *lines[import_end:]]
 
+
 def first_top_level_import_group_start(lines: list[str]) -> int | None:
     start = 0
     docstring_end = find_initial_module_docstring_end(lines)
@@ -2228,6 +2425,7 @@ def first_top_level_import_group_start(lines: list[str]) -> int | None:
             return index
         return None
     return None
+
 
 def format_long_assignment_line(line: str) -> str:
     if len(line) <= MULTILINE_LITERAL_LINE_LENGTH:
@@ -2246,6 +2444,7 @@ def format_long_assignment_line(line: str) -> str:
     if isinstance(statement.value, ast.Tuple):
         return format_multiline_tuple_assignment(indent, target, statement.value)
     return line
+
 
 def format_long_raise_call_line(line: str) -> str:
     if len(line) <= MULTILINE_LITERAL_LINE_LENGTH:
@@ -2276,6 +2475,7 @@ def format_long_raise_call_line(line: str) -> str:
         )
     )
 
+
 def format_long_print_call_line(line: str) -> str:
     if len(line) <= MULTILINE_LITERAL_LINE_LENGTH:
         return line
@@ -2297,6 +2497,7 @@ def format_long_print_call_line(line: str) -> str:
     argument_lines = format_print_argument_lines(value.args[0], child_indent)
     return "\n".join([f"{indent}print(", *argument_lines, f"{indent})"])
 
+
 def format_print_argument_lines(argument: ast.expr, indent: str) -> list[str]:
     if isinstance(argument, ast.BinOp) and isinstance(argument.op, ast.Add):
         operands = flatten_addition_operands(argument)
@@ -2308,6 +2509,7 @@ def format_print_argument_lines(argument: ast.expr, indent: str) -> list[str]:
             return lines
     return [f"{indent}{ast.unparse(argument)}"]
 
+
 def flatten_addition_operands(value: ast.expr) -> list[ast.expr]:
     if isinstance(value, ast.BinOp) and isinstance(value.op, ast.Add):
         return [
@@ -2315,6 +2517,7 @@ def flatten_addition_operands(value: ast.expr) -> list[ast.expr]:
             *flatten_addition_operands(value.right),
         ]
     return [value]
+
 
 def format_multiline_dict_assignment(
     indent: str,
@@ -2328,6 +2531,7 @@ def format_multiline_dict_assignment(
     expression_lines[0] = f"{indent}{target} = {expression_lines[0].strip()}"
     return "\n".join(expression_lines)
 
+
 def format_multiline_list_assignment(
     indent: str,
     target: str,
@@ -2339,6 +2543,7 @@ def format_multiline_list_assignment(
     expression_lines = format_multiline_expression(value, indent)
     expression_lines[0] = f"{indent}{target} = {expression_lines[0].strip()}"
     return "\n".join(expression_lines)
+
 
 def format_multiline_tuple_assignment(
     indent: str,
@@ -2352,6 +2557,7 @@ def format_multiline_tuple_assignment(
     expression_lines[0] = f"{indent}{target} = {expression_lines[0].strip()}"
     return "\n".join(expression_lines)
 
+
 def format_multiline_expression(value: ast.expr, indent: str) -> list[str]:
     if isinstance(value, ast.Dict):
         return format_multiline_dict(value, indent)
@@ -2360,6 +2566,7 @@ def format_multiline_expression(value: ast.expr, indent: str) -> list[str]:
     if isinstance(value, ast.Tuple):
         return format_multiline_sequence(value.elts, "(", ")", indent)
     return [f"{indent}{ast.unparse(value)}"]
+
 
 def format_multiline_dict(value: ast.Dict, indent: str) -> list[str]:
     if not value.keys:
@@ -2380,6 +2587,7 @@ def format_multiline_dict(value: ast.Dict, indent: str) -> list[str]:
     lines.append(f"{indent}}}")
     return lines
 
+
 def format_multiline_sequence(
     values: list[ast.expr],
     open_text: str,
@@ -2395,6 +2603,7 @@ def format_multiline_sequence(
         append_multiline_item(lines, child_indent, item, child_indent)
     lines.append(f"{indent}{close_text}")
     return lines
+
 
 def append_multiline_item(
     lines: list[str],
@@ -2415,6 +2624,7 @@ def append_multiline_item(
     lines.append(f"{prefix}{value_lines[0].strip()}")
     lines.extend(value_lines[1:-1])
     lines.append(f"{value_lines[-1]},")
+
 
 def format_inline_nested_item(prefix: str, value: ast.expr) -> str | None:
     if not isinstance(value, ast.Dict):

@@ -1,8 +1,9 @@
 import ast
+from dataclasses import dataclass
 from typing import Any
+
 from pyc2py.astree import make_constant, make_name
-from pyc2py.bytecode.instruction import IGNORED_BEHAVIOR_OPNAMES
-from pyc2py.bytecode.instruction import Instruction
+from pyc2py.bytecode.instruction import IGNORED_BEHAVIOR_OPNAMES, Instruction
 from pyc2py.bytecode.stack_effect import instruction_stack_effect
 from pyc2py.decompiler.control_loop import ControlLoopRecoveryMixin
 from pyc2py.decompiler.opcodes.flow import terminal_tail_end_index
@@ -20,6 +21,15 @@ from pyc2py.decompiler.structures import (
     make_match,
     make_with_statement,
 )
+
+
+@dataclass(frozen=True, slots=True)
+class TargetedIfExpressionShape:
+    jump_index: int
+    false_index: int
+    join_jump_index: int
+    store_index: int
+
 
 class ControlRecoveryMixin(ControlLoopRecoveryMixin):
     def try_translate_send_value(
@@ -124,7 +134,9 @@ class ControlRecoveryMixin(ControlLoopRecoveryMixin):
                 make_async_with_statement(context_expr, body, optional_vars)
             )
         else:
-            self.statements.append(make_with_statement(context_expr, body, optional_vars))
+            self.statements.append(
+                make_with_statement(context_expr, body, optional_vars)
+            )
         if trailing_return is not None:
             self.statements.append(trailing_return)
         return region.after_index
@@ -256,134 +268,91 @@ class ControlRecoveryMixin(ControlLoopRecoveryMixin):
         end_index: int,
         condition: ast.expr,
     ) -> int | None:
-        conditional_jumps = [cursor]
-        skip_index: int | None = None
-        for index in range(cursor + 1, body_start):
-            instruction = instructions[index]
-            if not is_forward_conditional_jump(instruction):
-                continue
-
-            target_index = offset_to_index.get(int(instruction.argval))
-            if target_index is None:
-                return None
-            if target_index == body_start:
-                conditional_jumps.append(index)
-            elif target_index > body_start:
-                if target_index > end_index:
-                    return None
-                if skip_index is None:
-                    skip_index = target_index
-                elif skip_index != target_index:
-                    return None
-                conditional_jumps.append(index)
-            elif "OR_POP" in instruction.opname:
-                continue
-            elif target_index > index:
-                conditional_jumps.append(index)
-            else:
-                return None
-
-        if len(conditional_jumps) < 2 or skip_index is None:
+        jump_result = find_disjunctive_guard_jumps(
+            instructions,
+            offset_to_index,
+            cursor,
+            body_start,
+            end_index,
+        )
+        if jump_result is None:
             return None
+        jump_indexes, skip_index = jump_result
         if skip_index <= body_start or skip_index > end_index:
             return None
-        if not has_only_ignored_instructions(instructions, body_start, skip_index):
-            body = self.translate_child_statements(
-                instructions,
-                body_start,
-                skip_index,
-            )
-        else:
-            body = []
-        if not body:
-            body = self.translate_child_statements(
-                instructions,
-                body_start,
-                skip_index,
-            )
+
+        body = self.translate_child_statements(instructions, body_start, skip_index)
         if not body:
             return None
 
-        jump_indexes = frozenset(conditional_jumps)
-        expression_cache: dict[tuple[int, int], ast.expr] = {}
-        condition_cache: dict[int, ast.expr | None] = {}
-
-        def expression_between(start_index: int, jump_index: int) -> ast.expr | None:
-            cache_key = (start_index, jump_index)
-            if cache_key in expression_cache:
-                return expression_cache[cache_key]
-            if jump_index == cursor:
-                expression = condition
-            else:
-                if not simple_condition_range(
-                    instructions,
-                    start_index,
-                    jump_index,
-                    self.version,
-                ):
-                    return None
-                expression = self.evaluate_expression_range(
-                    instructions,
-                    start_index,
-                    jump_index,
-                )
-                if expression is None:
-                    return None
-            expression_cache[cache_key] = expression
-            return expression
-
-        def success_from(start_index: int) -> ast.expr | None:
-            if start_index == body_start:
-                return ast.Constant(value=True)
-            if start_index == skip_index:
-                return ast.Constant(value=False)
-            if start_index > body_start:
-                return ast.Constant(value=False)
-            if start_index in condition_cache:
-                return condition_cache[start_index]
-
-            jump_index = next_condition_jump(
-                instructions,
-                jump_indexes,
-                start_index,
-                body_start,
-            )
-            if jump_index is None:
-                if has_only_ignored_instructions(instructions, start_index, body_start):
-                    return ast.Constant(value=True)
-                return None
-
-            expression = expression_between(start_index, jump_index)
-            if expression is None:
-                condition_cache[start_index] = None
-                return None
-
-            jump = instructions[jump_index]
-            target_index = offset_to_index.get(int(jump.argval))
-            if target_index is None:
-                condition_cache[start_index] = None
-                return None
-            jump_condition = condition_from_jump(jump.opname, expression)
-            taken_success = success_from(target_index)
-            fallthrough_success = success_from(jump_index + 1)
-            if taken_success is None or fallthrough_success is None:
-                condition_cache[start_index] = None
-                return None
-
-            result = combine_branch_success(
-                terminal_guard_for_jump(jump, jump_condition, jumps_to_terminal=True),
-                taken_success,
-                terminal_guard_for_jump(jump, jump_condition, jumps_to_terminal=False),
-                fallthrough_success,
-            )
-            condition_cache[start_index] = result
-            return result
-
-        guard = success_from(cursor)
+        guard = self.build_disjunctive_guard(
+            instructions,
+            offset_to_index,
+            jump_indexes,
+            cursor,
+            body_start,
+            condition,
+        )
         if guard is None or is_false_constant(guard):
             return None
         self.statements.append(ast.If(test=guard, body=body, orelse=[]))
         return skip_index
+
+    def build_disjunctive_guard(
+        self,
+        instructions: list[Instruction],
+        offset_to_index: dict[int, int],
+        jump_indexes: frozenset[int],
+        cursor: int,
+        body_start: int,
+        condition: ast.expr,
+    ) -> ast.expr | None:
+        results: dict[int, ast.expr | None] = {body_start: ast.Constant(value=True)}
+        for start_index in range(body_start - 1, cursor - 1, -1):
+            jump_index = next_condition_jump(
+                instructions, jump_indexes, start_index, body_start
+            )
+            if jump_index is None:
+                results[start_index] = ignored_guard_result(
+                    instructions, start_index, body_start
+                )
+                continue
+
+            expression = self.read_disjunctive_guard_expression(
+                instructions, start_index, jump_index, cursor, condition
+            )
+            jump = instructions[jump_index]
+            target_index = offset_to_index.get(int(jump.argval))
+            taken = guard_result_at(results, target_index, body_start)
+            fallthrough = guard_result_at(results, jump_index + 1, body_start)
+            if expression is None or taken is None or fallthrough is None:
+                results[start_index] = None
+                continue
+
+            jump_condition = condition_from_jump(jump.opname, expression)
+            results[start_index] = combine_branch_success(
+                terminal_guard_for_jump(jump, jump_condition, jumps_to_terminal=True),
+                taken,
+                terminal_guard_for_jump(jump, jump_condition, jumps_to_terminal=False),
+                fallthrough,
+            )
+        return results.get(cursor)
+
+    def read_disjunctive_guard_expression(
+        self,
+        instructions: list[Instruction],
+        start_index: int,
+        jump_index: int,
+        cursor: int,
+        initial_condition: ast.expr,
+    ) -> ast.expr | None:
+        if jump_index == cursor:
+            return initial_condition
+        if not simple_condition_range(
+            instructions, start_index, jump_index, self.version
+        ):
+            return None
+        return self.evaluate_expression_range(instructions, start_index, jump_index)
 
     def try_translate_targeted_prefixed_guard_body_statement(
         self,
@@ -394,37 +363,19 @@ class ControlRecoveryMixin(ControlLoopRecoveryMixin):
         end_index: int,
         condition: ast.expr,
     ) -> int | None:
-        body_offset = instructions[body_start].offset
-        skip_index: int | None = None
-        prefix_jumps: list[int] = []
-        scan_start = cursor + 1
-        for index in range(cursor + 1, body_start):
-            instruction = instructions[index]
-            if not is_forward_conditional_jump(instruction):
-                continue
-            if not simple_condition_range(
-                instructions,
-                scan_start,
-                index,
-                self.version,
-            ):
-                return None
-            target_index = offset_to_index.get(int(instruction.argval))
-            if target_index is None:
-                return None
-            if instruction.argval != body_offset:
-                if target_index <= body_start or target_index > end_index:
-                    return None
-                if skip_index is None:
-                    skip_index = target_index
-                elif skip_index != target_index:
-                    return None
-            prefix_jumps.append(index)
-            scan_start = index + 1
-
-        if not prefix_jumps or skip_index is None:
+        prefix = targeted_prefix_jumps(
+            instructions,
+            offset_to_index,
+            cursor,
+            body_start,
+            end_index,
+            self.version,
+        )
+        if prefix is None:
             return None
+        prefix_jumps, skip_index = prefix
 
+        body_offset = instructions[body_start].offset
         skip_offset = instructions[skip_index].offset
         current = terminal_guard_for_jump(
             instructions[cursor],
@@ -542,58 +493,32 @@ class ControlRecoveryMixin(ControlLoopRecoveryMixin):
         end_index: int,
         condition: ast.expr,
     ) -> int | None:
-        jump_index = previous_non_ignored_index(
+        shape = targeted_if_expression_shape(
             instructions,
-            true_index - 1,
-            cursor + 1,
-        )
-        if jump_index is None:
-            return None
-
-        jump = instructions[jump_index]
-        if not is_forward_conditional_jump(jump):
-            return None
-
-        false_index = offset_to_index.get(int(jump.argval))
-        if false_index is None or false_index <= true_index or false_index >= end_index:
-            return None
-
-        join_jump_index = previous_non_ignored_index(
-            instructions,
-            false_index - 1,
+            offset_to_index,
+            cursor,
             true_index,
+            end_index,
         )
-        if join_jump_index is None:
+        if shape is None:
             return None
-
-        join_jump = instructions[join_jump_index]
-        if join_jump.opname not in {"JUMP", "JUMP_ABSOLUTE", "JUMP_FORWARD"}:
-            return None
-
-        store_index = offset_to_index.get(int(join_jump.argval))
-        if store_index is None or store_index != false_index + 1:
-            return None
-        if store_index >= end_index:
-            return None
-
-        store = instructions[store_index]
-        if store.opname not in {"STORE_DEREF", "STORE_FAST", "STORE_GLOBAL", "STORE_NAME"}:
-            return None
+        jump = instructions[shape.jump_index]
+        store = instructions[shape.store_index]
 
         right = self.evaluate_expression_range(
             instructions,
             cursor + 1,
-            jump_index,
+            shape.jump_index,
         )
         true_value = self.evaluate_expression_range(
             instructions,
             true_index,
-            join_jump_index,
+            shape.join_jump_index,
         )
         false_value = self.evaluate_expression_range(
             instructions,
-            false_index,
-            store_index,
+            shape.false_index,
+            shape.store_index,
         )
         if right is None or true_value is None or false_value is None:
             return None
@@ -619,7 +544,7 @@ class ControlRecoveryMixin(ControlLoopRecoveryMixin):
         if store.opname == "STORE_GLOBAL":
             self.add_global_name(str(store.argval))
         self.statements.append(ast.Assign(targets=[target], value=value))
-        return store_index + 1
+        return shape.store_index + 1
 
     def try_translate_guard_body_statement(
         self,
@@ -644,7 +569,11 @@ class ControlRecoveryMixin(ControlLoopRecoveryMixin):
                 continue
 
             skip_index = offset_to_index.get(int(instruction.argval))
-            if skip_index is None or skip_index <= target_index or skip_index > end_index:
+            if (
+                skip_index is None
+                or skip_index <= target_index
+                or skip_index > end_index
+            ):
                 return None
             if after_index is None:
                 after_index = skip_index
@@ -759,6 +688,49 @@ class ControlRecoveryMixin(ControlLoopRecoveryMixin):
         if after_index < len(instructions):
             after_offset = instructions[after_index].offset
 
+        guard = self.read_loop_continue_guard(
+            instructions,
+            cursor,
+            target_index,
+            after_offset,
+            condition,
+        )
+        if guard is not None:
+            self.statements.append(ast.If(test=guard, body=[ast.Continue()], orelse=[]))
+            return after_index
+
+        body = self.translate_child_statements(
+            instructions,
+            cursor + 1,
+            target_index,
+        )
+        if body:
+            test = (
+                condition
+                if is_false_jump(instructions[cursor].opname)
+                else invert_condition(condition)
+            )
+            self.statements.append(ast.If(test=test, body=body, orelse=[]))
+            if not body_ends_with_break(body):
+                self.statements.append(ast.Continue())
+            return after_index
+
+        guard = terminal_guard_for_jump(
+            instructions[cursor],
+            condition,
+            jumps_to_terminal=True,
+        )
+        self.statements.append(ast.If(test=guard, body=[ast.Continue()], orelse=[]))
+        return after_index
+
+    def read_loop_continue_guard(
+        self,
+        instructions: list[Instruction],
+        cursor: int,
+        target_index: int,
+        after_offset: int | None,
+        condition: ast.expr,
+    ) -> ast.expr | None:
         guard = terminal_guard_for_jump(
             instructions[cursor],
             condition,
@@ -799,31 +771,7 @@ class ControlRecoveryMixin(ControlLoopRecoveryMixin):
                 ],
             )
             scan_start = index + 1
-
-        if found_skip_jump:
-            self.statements.append(
-                ast.If(test=guard, body=[ast.Continue()], orelse=[])
-            )
-            return after_index
-
-        body = self.translate_child_statements(
-            instructions,
-            cursor + 1,
-            target_index,
-        )
-        if body:
-            test = (
-                condition
-                if is_false_jump(instructions[cursor].opname)
-                else invert_condition(condition)
-            )
-            self.statements.append(ast.If(test=test, body=body, orelse=[]))
-            if not body_ends_with_break(body):
-                self.statements.append(ast.Continue())
-            return after_index
-
-        self.statements.append(ast.If(test=guard, body=[ast.Continue()], orelse=[]))
-        return after_index
+        return guard if found_skip_jump else None
 
     def try_translate_loop_continue_body_statement(
         self,
@@ -898,9 +846,7 @@ class ControlRecoveryMixin(ControlLoopRecoveryMixin):
             scan_start = index + 1
 
         if found_skip_jump:
-            self.statements.append(
-                ast.If(test=guard, body=[ast.Continue()], orelse=[])
-            )
+            self.statements.append(ast.If(test=guard, body=[ast.Continue()], orelse=[]))
             return target_index
 
         body = self.translate_child_statements(
@@ -975,6 +921,64 @@ class ControlRecoveryMixin(ControlLoopRecoveryMixin):
         self.statements.append(ast.If(test=guard, body=body, orelse=[]))
         return terminal_end
 
+    def scan_until_chained_comparison_target_change(
+        self,
+        instructions: list[Instruction],
+        offset_to_index: dict[int, int],
+        scan_start: int,
+        false_index: int,
+        end_index: int,
+        comparison: ast.Compare,
+    ) -> tuple[Any, ast.Compare, int, int] | None:
+        child = self.make_child()
+        for _scan_step in range(len(instructions)):
+            jump_index = find_chained_comparison_jump(
+                instructions, scan_start, false_index
+            )
+            if jump_index is None:
+                return None
+            target_index = offset_to_index.get(int(instructions[jump_index].argval))
+            if target_index is None or not jump_index < target_index <= end_index:
+                return None
+
+            merged = extend_chained_comparison(
+                child, instructions, scan_start, jump_index, comparison
+            )
+            if merged is None:
+                return None
+            comparison = merged
+            if target_index != false_index:
+                return child, comparison, jump_index, target_index
+            scan_start = jump_index + 1
+        return None
+
+    def scan_fixed_target_chained_comparison(
+        self,
+        instructions: list[Instruction],
+        offset_to_index: dict[int, int],
+        scan_start: int,
+        false_index: int,
+        comparison: ast.Compare,
+    ) -> tuple[Any, ast.Compare, int] | None:
+        child = self.make_child()
+        for _scan_step in range(len(instructions)):
+            jump_index = find_chained_comparison_jump(
+                instructions, scan_start, false_index
+            )
+            if jump_index is None:
+                return child, comparison, scan_start
+            if offset_to_index.get(int(instructions[jump_index].argval)) != false_index:
+                return None
+
+            merged = extend_chained_comparison(
+                child, instructions, scan_start, jump_index, comparison
+            )
+            if merged is None:
+                return None
+            comparison = merged
+            scan_start = jump_index + 1
+        return None
+
     def try_translate_chained_comparison(
         self,
         instructions: list[Instruction],
@@ -1020,34 +1024,17 @@ class ControlRecoveryMixin(ControlLoopRecoveryMixin):
         if body_return is not None:
             return body_return
 
-        child = self.make_child()
-        combined = first_compare
-        scan_start = cursor + 1
-        while True:
-            next_jump_index = find_chained_comparison_jump(
-                instructions, scan_start, false_index
-            )
-            if next_jump_index is None:
-                return None
-
-            next_jump = instructions[next_jump_index]
-            next_false_index = offset_to_index.get(int(next_jump.argval))
-            if next_false_index is None or next_false_index <= next_jump_index:
-                return None
-            if next_false_index > end_index:
-                return None
-
-            child.translate_range(instructions, scan_start, next_jump_index)
-            if not child.stack:
-                return None
-            next_compare = coerce_expr(child.stack[-1])
-            combined = merge_chained_compare(combined, next_compare)
-            if combined is None:
-                return None
-            child.pop_or_none()
-            if next_false_index != false_index:
-                break
-            scan_start = next_jump_index + 1
+        scan = self.scan_until_chained_comparison_target_change(
+            instructions,
+            offset_to_index,
+            cursor + 1,
+            false_index,
+            end_index,
+            first_compare,
+        )
+        if scan is None:
+            return None
+        child, combined, next_jump_index, next_false_index = scan
         self.warnings.extend(child.warnings)
 
         body_end = min(
@@ -1076,40 +1063,17 @@ class ControlRecoveryMixin(ControlLoopRecoveryMixin):
         end_index: int,
         first_compare: ast.Compare,
     ) -> int | None:
-        child = self.make_child()
-        combined = first_compare
-        scan_start = cursor + 1
-        next_jump_index = None
-        next_false_index = false_index
-        while True:
-            next_jump_index = find_chained_comparison_jump(
-                instructions,
-                scan_start,
-                next_false_index,
-            )
-            if next_jump_index is None:
-                return None
-
-            next_jump_false_index = offset_to_index.get(
-                int(instructions[next_jump_index].argval)
-            )
-            if next_jump_false_index is None or next_jump_false_index <= next_jump_index:
-                return None
-            if next_jump_false_index > end_index:
-                return None
-
-            child.translate_range(instructions, scan_start, next_jump_index)
-            if not child.stack:
-                return None
-            next_compare = coerce_expr(child.stack[-1])
-            combined = merge_chained_compare(combined, next_compare)
-            if combined is None:
-                return None
-            child.pop_or_none()
-            if next_jump_false_index != next_false_index:
-                next_false_index = next_jump_false_index
-                break
-            scan_start = next_jump_index + 1
+        scan = self.scan_until_chained_comparison_target_change(
+            instructions,
+            offset_to_index,
+            cursor + 1,
+            false_index,
+            end_index,
+            first_compare,
+        )
+        if scan is None:
+            return None
+        child, combined, _, next_false_index = scan
 
         true_start = chained_compare_true_body_start(
             instructions,
@@ -1180,39 +1144,25 @@ class ControlRecoveryMixin(ControlLoopRecoveryMixin):
         }:
             return None
 
-        child = self.make_child()
-        combined = first_compare
-        scan_start = cursor + 1
-        while True:
-            next_jump_index = find_chained_comparison_jump(
-                instructions, scan_start, false_index
-            )
-            if next_jump_index is None:
-                break
-
-            next_jump_false_index = offset_to_index.get(
-                int(instructions[next_jump_index].argval)
-            )
-            if next_jump_false_index is None or next_jump_false_index != false_index:
-                return None
-
-            child.translate_range(instructions, scan_start, next_jump_index)
-            if not child.stack:
-                return None
-            next_compare = coerce_expr(child.stack[-1])
-            combined = merge_chained_compare(combined, next_compare)
-            if combined is None:
-                return None
-            child.pop_or_none()
-            scan_start = next_jump_index + 1
+        scan = self.scan_fixed_target_chained_comparison(
+            instructions,
+            offset_to_index,
+            cursor + 1,
+            false_index,
+            first_compare,
+        )
+        if scan is None:
+            return None
+        child, combined, scan_start = scan
 
         child.translate_range(instructions, scan_start, true_return_index)
         if not child.stack:
             return None
         final_compare = coerce_expr(child.stack[-1])
-        combined = merge_chained_compare(combined, final_compare)
-        if combined is None:
+        merged = merge_chained_compare(combined, final_compare)
+        if merged is None:
             return None
+        combined = merged
         self.warnings.extend(child.warnings)
 
         after_false_return = chained_compare_false_return_end(
@@ -1249,39 +1199,25 @@ class ControlRecoveryMixin(ControlLoopRecoveryMixin):
             return None
 
         true_store = instructions[true_store_index]
-        child = self.make_child()
-        combined = first_compare
-        scan_start = cursor + 1
-        while True:
-            next_jump_index = find_chained_comparison_jump(
-                instructions, scan_start, false_index
-            )
-            if next_jump_index is None:
-                break
-
-            next_jump_false_index = offset_to_index.get(
-                int(instructions[next_jump_index].argval)
-            )
-            if next_jump_false_index is None or next_jump_false_index != false_index:
-                return None
-
-            child.translate_range(instructions, scan_start, next_jump_index)
-            if not child.stack:
-                return None
-            next_compare = coerce_expr(child.stack[-1])
-            combined = merge_chained_compare(combined, next_compare)
-            if combined is None:
-                return None
-            child.pop_or_none()
-            scan_start = next_jump_index + 1
+        scan = self.scan_fixed_target_chained_comparison(
+            instructions,
+            offset_to_index,
+            cursor + 1,
+            false_index,
+            first_compare,
+        )
+        if scan is None:
+            return None
+        child, combined, scan_start = scan
 
         child.translate_range(instructions, scan_start, true_store_index)
         if not child.stack:
             return None
         final_compare = coerce_expr(child.stack[-1])
-        combined = merge_chained_compare(combined, final_compare)
-        if combined is None:
+        merged = merge_chained_compare(combined, final_compare)
+        if merged is None:
             return None
+        combined = merged
 
         after_false_store = chained_compare_false_store_end(
             instructions,
@@ -1358,7 +1294,9 @@ class ControlRecoveryMixin(ControlLoopRecoveryMixin):
             if is_false_jump(instructions[cursor].opname)
             else invert_condition(condition)
         )
-        self.statements.append(ast.While(test=test, body=body or [ast.Pass()], orelse=[]))
+        self.statements.append(
+            ast.While(test=test, body=body or [ast.Pass()], orelse=[])
+        )
         return exit_index
 
     def simplify_modern_loop_break_tail(
@@ -1389,10 +1327,11 @@ class ControlRecoveryMixin(ControlLoopRecoveryMixin):
         loop_body_offset = int(instructions[start_index].offset)
         for index in range(exit_index - 1, start_index - 1, -1):
             instruction = instructions[index]
-            if (
-                instruction.opname not in {"JUMP_ABSOLUTE", "JUMP_BACKWARD", "JUMP"}
-                and not is_backward_conditional_jump(instruction)
-            ):
+            if instruction.opname not in {
+                "JUMP_ABSOLUTE",
+                "JUMP_BACKWARD",
+                "JUMP",
+            } and not is_backward_conditional_jump(instruction):
                 continue
             if int(instruction.argval) == loop_body_offset:
                 return index
@@ -1713,6 +1652,7 @@ class ControlRecoveryMixin(ControlLoopRecoveryMixin):
             loop_none_return_is_break=self.loop_none_return_is_break,
         )
 
+
 CONDITIONAL_HANDLER_ORDER = (
     "try_translate_loop_continue_guard_statement",
     "try_translate_loop_continue_body_statement",
@@ -1742,6 +1682,7 @@ CONDITIONAL_HANDLERS_WITHOUT_END = frozenset(
     {"try_translate_prefixed_guard_body_statement"}
 )
 
+
 def call_conditional_handler(
     decompiler: ControlRecoveryMixin,
     handler_name: str,
@@ -1765,6 +1706,7 @@ def call_conditional_handler(
         end_index,
         condition,
     )
+
 
 def find_send_value_end(
     instructions: list[Instruction],
@@ -1798,6 +1740,7 @@ def find_send_value_end(
         end_index,
     )
 
+
 def next_prefixed_opcode(
     instructions: list[Instruction],
     cursor: int,
@@ -1808,6 +1751,7 @@ def next_prefixed_opcode(
     if index >= end_index or instructions[index].opname != opname:
         return None
     return index
+
 
 def find_send_value_jump(
     instructions: list[Instruction],
@@ -1832,6 +1776,7 @@ def find_send_value_jump(
         "JUMP_BACKWARD_NO_INTERRUPT",
     )
 
+
 def send_value_end_index(
     instructions: list[Instruction],
     offset_to_index: dict[int, int],
@@ -1852,6 +1797,7 @@ def send_value_end_index(
         return None
     return end_send_index
 
+
 def skip_yield_from_prefix(
     instructions: list[Instruction],
     cursor: int,
@@ -1864,6 +1810,7 @@ def skip_yield_from_prefix(
     }:
         cursor += 1
     return cursor
+
 
 def find_loop_cleanup_return_start(
     instructions: list[Instruction],
@@ -1884,20 +1831,19 @@ def find_loop_cleanup_return_start(
         return None
     return None
 
+
 def is_expression_range_boundary_op(opname: str) -> bool:
-    return (
-        "JUMP" in opname
-        or opname in {
-            "FOR_ITER",
-            "GET_ITER",
-            "GET_AITER",
-            "SEND",
-            "RETURN_CONST",
-            "RETURN_VALUE",
-            "RAISE_VARARGS",
-            "RERAISE",
-        }
-    )
+    return "JUMP" in opname or opname in {
+        "FOR_ITER",
+        "GET_ITER",
+        "GET_AITER",
+        "SEND",
+        "RETURN_CONST",
+        "RETURN_VALUE",
+        "RAISE_VARARGS",
+        "RERAISE",
+    }
+
 
 def retry_loop_start_index(
     instructions: list[Instruction],
@@ -1916,6 +1862,7 @@ def retry_loop_start_index(
     if not instructions[loop_start].is_jump_target:
         return None
     return loop_start
+
 
 def find_backward_retry_loop(
     instructions: list[Instruction],
@@ -1949,6 +1896,7 @@ def find_backward_retry_loop(
         return condition_index, retry_jump_index, after_index
     return None
 
+
 def retry_loop_after_index(
     instructions: list[Instruction],
     offset_to_index: dict[int, int],
@@ -1973,6 +1921,7 @@ def retry_loop_after_index(
         return None
     return after_index
 
+
 def loop_cleanup_return_end(
     instructions: list[Instruction],
     cursor: int,
@@ -1993,10 +1942,12 @@ def loop_cleanup_return_end(
         return None
     return cursor
 
+
 def make_send_value_expression(opname: str, value: ast.expr) -> ast.expr:
     if opname == "GET_AWAITABLE":
         return ast.Await(value=value)
     return ast.YieldFrom(value=value)
+
 
 def terminal_block_end_index(
     instructions: list[Instruction],
@@ -2004,9 +1955,100 @@ def terminal_block_end_index(
     end_index: int,
 ) -> int | None:
     for index in range(start_index, end_index):
-        if instructions[index].opname in {"RETURN_CONST", "RETURN_VALUE", "RAISE_VARARGS"}:
+        if instructions[index].opname in {
+            "RETURN_CONST",
+            "RETURN_VALUE",
+            "RAISE_VARARGS",
+        }:
             return index + 1
     return None
+
+
+def targeted_prefix_jumps(
+    instructions: list[Instruction],
+    offset_to_index: dict[int, int],
+    cursor: int,
+    body_start: int,
+    end_index: int,
+    version: tuple[int, ...] | None,
+) -> tuple[list[int], int] | None:
+    body_offset = instructions[body_start].offset
+    skip_index: int | None = None
+    prefix_jumps: list[int] = []
+    scan_start = cursor + 1
+    for index in range(cursor + 1, body_start):
+        instruction = instructions[index]
+        if not is_forward_conditional_jump(instruction):
+            continue
+        if not simple_condition_range(instructions, scan_start, index, version):
+            return None
+        target_index = offset_to_index.get(int(instruction.argval))
+        if target_index is None:
+            return None
+        if instruction.argval != body_offset:
+            if target_index <= body_start or target_index > end_index:
+                return None
+            if skip_index is None:
+                skip_index = target_index
+            elif skip_index != target_index:
+                return None
+        prefix_jumps.append(index)
+        scan_start = index + 1
+
+    if not prefix_jumps or skip_index is None:
+        return None
+    return prefix_jumps, skip_index
+
+
+def targeted_if_expression_shape(
+    instructions: list[Instruction],
+    offset_to_index: dict[int, int],
+    cursor: int,
+    true_index: int,
+    end_index: int,
+) -> TargetedIfExpressionShape | None:
+    jump_index = previous_non_ignored_index(
+        instructions,
+        true_index - 1,
+        cursor + 1,
+    )
+    if jump_index is None:
+        return None
+    jump = instructions[jump_index]
+    if not is_forward_conditional_jump(jump):
+        return None
+
+    false_index = offset_to_index.get(int(jump.argval))
+    if false_index is None or false_index <= true_index or false_index >= end_index:
+        return None
+    join_jump_index = previous_non_ignored_index(
+        instructions,
+        false_index - 1,
+        true_index,
+    )
+    if join_jump_index is None:
+        return None
+    join_jump = instructions[join_jump_index]
+    if join_jump.opname not in {"JUMP", "JUMP_ABSOLUTE", "JUMP_FORWARD"}:
+        return None
+
+    store_index = offset_to_index.get(int(join_jump.argval))
+    if store_index != false_index + 1 or store_index >= end_index:
+        return None
+    if instructions[store_index].opname not in {
+        "STORE_DEREF",
+        "STORE_FAST",
+        "STORE_GLOBAL",
+        "STORE_NAME",
+    }:
+        return None
+    return TargetedIfExpressionShape(
+        jump_index,
+        false_index,
+        join_jump_index,
+        store_index,
+    )
+
 
 def terminal_guard_for_jump(
     instruction: Instruction,
@@ -2021,6 +2063,7 @@ def terminal_guard_for_jump(
     if is_false_jump(instruction.opname):
         return condition
     return invert_condition(condition)
+
 
 def statement_condition_prefix_jumps(
     instructions: list[Instruction],
@@ -2042,15 +2085,18 @@ def statement_condition_prefix_jumps(
             return None
 
         target_index = offset_to_index.get(int(instruction.argval))
-        if target_index is None:
+        target = next_statement_condition_body_start(
+            instructions,
+            cursor,
+            jump_index,
+            instruction,
+            target_index,
+            false_offset,
+            body_start,
+        )
+        if not target[0]:
             return None
-        if instruction.argval != false_offset:
-            if target_index <= cursor or target_index >= jump_index:
-                return None
-            if target_follows_branch_body(instructions, cursor, target_index):
-                return None
-            if body_start is None or target_index < body_start:
-                body_start = target_index
+        body_start = target[1]
         jumps.append(index)
         scan_start = index + 1
 
@@ -2059,6 +2105,29 @@ def statement_condition_prefix_jumps(
     if body_start is None:
         return jumps
     return [index for index in jumps if index < body_start]
+
+
+def next_statement_condition_body_start(
+    instructions: list[Instruction],
+    cursor: int,
+    jump_index: int,
+    instruction: Instruction,
+    target_index: int | None,
+    false_offset: int,
+    body_start: int | None,
+) -> tuple[bool, int | None]:
+    if target_index is None:
+        return False, body_start
+    if instruction.argval == false_offset:
+        return True, body_start
+    if target_index <= cursor or target_index >= jump_index:
+        return False, body_start
+    if target_follows_branch_body(instructions, cursor, target_index):
+        return False, body_start
+    if body_start is None or target_index < body_start:
+        body_start = target_index
+    return True, body_start
+
 
 def target_follows_branch_body(
     instructions: list[Instruction],
@@ -2069,6 +2138,7 @@ def target_follows_branch_body(
     if previous_index is None:
         return False
     return not is_forward_conditional_jump(instructions[previous_index])
+
 
 def statement_condition_body_start(
     instructions: list[Instruction],
@@ -2089,6 +2159,7 @@ def statement_condition_body_start(
     if body_start is not None:
         return body_start
     return jumps[-1] + 1
+
 
 SIMPLE_CONDITION_OPS = {
     "CACHE",
@@ -2118,6 +2189,7 @@ SIMPLE_CONDITION_OPS = {
 
 MAX_SIMPLE_CONDITION_OPS = 16
 
+
 def simple_condition_range(
     instructions: list[Instruction],
     start_index: int,
@@ -2144,11 +2216,10 @@ def simple_condition_range(
         version,
     )
 
+
 def is_simple_condition_op(opname: str) -> bool:
-    return (
-        opname in SIMPLE_CONDITION_OPS
-        or opname.startswith(("BINARY_", "UNARY_"))
-    )
+    return opname in SIMPLE_CONDITION_OPS or opname.startswith(("BINARY_", "UNARY_"))
+
 
 def condition_range_has_clean_stack_effect(
     instructions: list[Instruction],
@@ -2169,6 +2240,7 @@ def condition_range_has_clean_stack_effect(
         depth += effect.net
     return depth == 1
 
+
 def make_bool_and(left: ast.expr, right: ast.expr) -> ast.expr:
     if isinstance(left, ast.Constant) and left.value is True:
         return right
@@ -2185,22 +2257,22 @@ def make_bool_and(left: ast.expr, right: ast.expr) -> ast.expr:
         values.append(right)
     return ast.BoolOp(op=ast.And(), values=values)
 
+
 def make_statement_condition_suffix(
     pieces: list[tuple[Instruction, ast.expr]],
     false_offset: int,
     body_offset: int,
 ) -> ast.expr:
-    condition = ast.Constant(value=True)
+    condition: ast.expr = ast.Constant(value=True)
     for jump, expr in reversed(pieces):
         taken = terminal_guard_for_jump(jump, expr, jumps_to_terminal=True)
         fallthrough = terminal_guard_for_jump(jump, expr, jumps_to_terminal=False)
         if jump.argval == false_offset:
             condition = make_bool_and(fallthrough, condition)
         elif jump.argval == body_offset:
-            condition = make_bool_or(
-                [taken, make_bool_and(fallthrough, condition)]
-            )
+            condition = make_bool_or([taken, make_bool_and(fallthrough, condition)])
     return condition
+
 
 def combine_branch_success(
     taken_condition: ast.expr,
@@ -2218,6 +2290,7 @@ def combine_branch_success(
         return ast.Constant(value=True)
     return make_bool_or([taken, fallthrough])
 
+
 def make_success_branch(condition: ast.expr, success: ast.expr) -> ast.expr:
     if is_true_constant(success):
         return condition
@@ -2225,11 +2298,14 @@ def make_success_branch(condition: ast.expr, success: ast.expr) -> ast.expr:
         return ast.Constant(value=False)
     return make_bool_and(condition, success)
 
+
 def is_true_constant(value: ast.expr) -> bool:
     return isinstance(value, ast.Constant) and value.value is True
 
+
 def is_false_constant(value: ast.expr) -> bool:
     return isinstance(value, ast.Constant) and value.value is False
+
 
 def make_bool_or(values: list[ast.expr]) -> ast.expr:
     if not values:
@@ -2244,6 +2320,63 @@ def make_bool_or(values: list[ast.expr]) -> ast.expr:
             merged.append(value)
     return ast.BoolOp(op=ast.Or(), values=merged)
 
+
+def find_disjunctive_guard_jumps(
+    instructions: list[Instruction],
+    offset_to_index: dict[int, int],
+    cursor: int,
+    body_start: int,
+    end_index: int,
+) -> tuple[frozenset[int], int] | None:
+    conditional_jumps = [cursor]
+    skip_index: int | None = None
+    for index in range(cursor + 1, body_start):
+        instruction = instructions[index]
+        if not is_forward_conditional_jump(instruction):
+            continue
+
+        target_index = offset_to_index.get(int(instruction.argval))
+        if target_index is None:
+            return None
+        if target_index == body_start or index < target_index < body_start:
+            conditional_jumps.append(index)
+            continue
+        if target_index > body_start:
+            if target_index > end_index:
+                return None
+            if skip_index is not None and skip_index != target_index:
+                return None
+            skip_index = target_index
+            conditional_jumps.append(index)
+            continue
+        if "OR_POP" not in instruction.opname:
+            return None
+
+    if len(conditional_jumps) < 2 or skip_index is None:
+        return None
+    return frozenset(conditional_jumps), skip_index
+
+
+def ignored_guard_result(
+    instructions: list[Instruction], start_index: int, body_start: int
+) -> ast.expr | None:
+    if has_only_ignored_instructions(instructions, start_index, body_start):
+        return ast.Constant(value=True)
+    return None
+
+
+def guard_result_at(
+    results: dict[int, ast.expr | None],
+    index: int | None,
+    body_start: int,
+) -> ast.expr | None:
+    if index is None:
+        return None
+    if index > body_start:
+        return ast.Constant(value=False)
+    return results.get(index)
+
+
 def next_condition_jump(
     instructions: list[Instruction],
     jump_indexes: frozenset[int],
@@ -2257,6 +2390,7 @@ def next_condition_jump(
             continue
     return None
 
+
 def body_ends_with_break(body: list[ast.stmt]) -> bool:
     if not body:
         return False
@@ -2266,6 +2400,7 @@ def body_ends_with_break(body: list[ast.stmt]) -> bool:
     if isinstance(tail, ast.If) and not tail.orelse:
         return body_ends_with_break(tail.body)
     return False
+
 
 def has_effectful_skip_to_offset(
     instructions: list[Instruction],
@@ -2286,6 +2421,7 @@ def has_effectful_skip_to_offset(
         scan_start = index + 1
     return False
 
+
 def target_is_loop_continue(
     instructions: list[Instruction],
     cursor: int,
@@ -2302,6 +2438,7 @@ def target_is_loop_continue(
         return False
     return target.argval <= instructions[cursor].offset
 
+
 def is_backward_conditional_jump(instruction: Instruction) -> bool:
     if "JUMP_BACKWARD" not in instruction.opname:
         return False
@@ -2313,6 +2450,7 @@ def is_backward_conditional_jump(instruction: Instruction) -> bool:
         or "IF_NONE" in instruction.opname
         or "IF_NOT_NONE" in instruction.opname
     )
+
 
 def condition_prefix_offsets(
     instructions: list[Instruction],
@@ -2339,6 +2477,7 @@ def condition_prefix_offsets(
         if instruction.opname not in IGNORED_BEHAVIOR_OPNAMES
     )
 
+
 def loop_continue_terminal_start(
     instructions: list[Instruction],
     offset_to_index: dict[int, int],
@@ -2350,7 +2489,9 @@ def loop_continue_terminal_start(
     if not loop_continue_offsets:
         return None
 
-    terminal_index = previous_non_ignored_index(instructions, end_index - 1, start_index)
+    terminal_index = previous_non_ignored_index(
+        instructions, end_index - 1, start_index
+    )
     if terminal_index is None:
         return None
     if is_loop_continue_terminal(
@@ -2362,6 +2503,7 @@ def loop_continue_terminal_start(
     ):
         return terminal_index
     return None
+
 
 def is_loop_continue_terminal(
     instructions: list[Instruction],
@@ -2391,6 +2533,7 @@ def is_loop_continue_terminal(
         loop_continue_offsets,
     )
 
+
 def replace_matching_terminal_if_tail(
     body: list[ast.stmt],
     tail: list[ast.stmt],
@@ -2399,6 +2542,7 @@ def replace_matching_terminal_if_tail(
         replace_matching_terminal_if_tail_statement(statement, tail)
         for statement in body
     ]
+
 
 def replace_matching_terminal_if_tail_statement(
     statement: ast.stmt,
@@ -2412,6 +2556,7 @@ def replace_matching_terminal_if_tail_statement(
         return statement
     return ast.If(test=statement.test, body=[ast.Break()], orelse=[])
 
+
 def ast_statement_lists_equal(
     left: list[ast.stmt],
     right: list[ast.stmt],
@@ -2422,6 +2567,7 @@ def ast_statement_lists_equal(
         ast.dump(left_item) == ast.dump(right_item)
         for left_item, right_item in zip(left, right, strict=True)
     )
+
 
 def simple_if_body_end(
     instructions: list[Instruction],
@@ -2445,6 +2591,7 @@ def simple_if_body_end(
         return target_index
     return true_return_start
 
+
 def generated_none_return_region_ending_at(
     instructions: list[Instruction],
     end_index: int,
@@ -2460,6 +2607,7 @@ def generated_none_return_region_ending_at(
     if instructions[return_index].starts_line is not None:
         return None
     return start_index
+
 
 def none_return_region_ending_at(
     instructions: list[Instruction],
@@ -2481,6 +2629,7 @@ def none_return_region_ending_at(
         return value_index
     return None
 
+
 def none_return_region_starting_at(
     instructions: list[Instruction],
     start_index: int,
@@ -2500,6 +2649,7 @@ def none_return_region_starting_at(
         return return_index + 1
     return None
 
+
 def has_only_ignored_instructions(
     instructions: list[Instruction],
     start_index: int,
@@ -2510,12 +2660,14 @@ def has_only_ignored_instructions(
             return False
     return True
 
+
 def single_compare(value: ast.expr) -> ast.Compare | None:
     if not isinstance(value, ast.Compare):
         return None
     if len(value.ops) != 1 or len(value.comparators) != 1:
         return None
     return value
+
 
 def merge_chained_compare(
     first: ast.Compare,
@@ -2532,10 +2684,28 @@ def merge_chained_compare(
         comparators=[*first.comparators, *next_compare.comparators],
     )
 
+
+def extend_chained_comparison(
+    child: Any,
+    instructions: list[Instruction],
+    start_index: int,
+    jump_index: int,
+    comparison: ast.Compare,
+) -> ast.Compare | None:
+    child.translate_range(instructions, start_index, jump_index)
+    if not child.stack:
+        return None
+    merged = merge_chained_compare(comparison, coerce_expr(child.stack[-1]))
+    if merged is not None:
+        child.pop_or_none()
+    return merged
+
+
 def same_expression(left: ast.expr, right: ast.expr) -> bool:
     return ast.dump(left, include_attributes=False) == ast.dump(
         right, include_attributes=False
     )
+
 
 def find_chained_comparison_jump(
     instructions: list[Instruction],
@@ -2546,7 +2716,9 @@ def find_chained_comparison_jump(
         instruction = instructions[index]
         if instruction.opname in IGNORED_BEHAVIOR_OPNAMES:
             continue
-        if is_forward_conditional_jump(instruction) and is_false_jump(instruction.opname):
+        if is_forward_conditional_jump(instruction) and is_false_jump(
+            instruction.opname
+        ):
             return index
         if instruction.opname == "POP_TOP":
             continue
@@ -2554,6 +2726,7 @@ def find_chained_comparison_jump(
             continue
         return None
     return None
+
 
 def comparison_expression_op(opname: str) -> bool:
     return opname in {
@@ -2571,6 +2744,7 @@ def comparison_expression_op(opname: str) -> bool:
         "SWAP",
     }
 
+
 def skip_chained_compare_true_cleanup(
     instructions: list[Instruction],
     start_index: int,
@@ -2582,6 +2756,7 @@ def skip_chained_compare_true_cleanup(
     if instructions[cursor].opname == "POP_TOP":
         cursor = next_non_ignored_index(instructions, cursor + 1, end_index)
     return cursor
+
 
 def chained_compare_false_return_end(
     instructions: list[Instruction],
@@ -2606,6 +2781,7 @@ def chained_compare_false_return_end(
         return None
     return return_index + 1
 
+
 def chained_compare_true_body_start(
     instructions: list[Instruction],
     false_index: int,
@@ -2626,6 +2802,7 @@ def chained_compare_true_body_start(
 
     return next_non_ignored_index(instructions, jump_index + 1, next_false_index)
 
+
 def chained_compare_none_return_end(
     instructions: list[Instruction],
     start_index: int,
@@ -2639,6 +2816,7 @@ def chained_compare_none_return_end(
     if return_index is None or instructions[return_index].opname != "RETURN_VALUE":
         return None
     return return_index + 1
+
 
 def chained_compare_false_store_end(
     instructions: list[Instruction],
@@ -2667,6 +2845,7 @@ def chained_compare_false_store_end(
         return None
     return store_index + 1
 
+
 def is_name_store_op(opname: str) -> bool:
     return opname in {
         "STORE_DEREF",
@@ -2674,6 +2853,7 @@ def is_name_store_op(opname: str) -> bool:
         "STORE_GLOBAL",
         "STORE_NAME",
     }
+
 
 def find_chained_compare_true_store(
     instructions: list[Instruction],
@@ -2690,12 +2870,18 @@ def find_chained_compare_true_store(
             continue
         if store_index is None:
             continue
-        if instruction.opname in {"LOAD_DEREF", "LOAD_FAST", "LOAD_GLOBAL", "LOAD_NAME"}:
+        if instruction.opname in {
+            "LOAD_DEREF",
+            "LOAD_FAST",
+            "LOAD_GLOBAL",
+            "LOAD_NAME",
+        }:
             continue
         if instruction.opname in {"RETURN_CONST", "RETURN_VALUE"}:
             continue
         return None
     return store_index
+
 
 def next_non_ignored_index(
     instructions: list[Instruction],
@@ -2707,6 +2893,7 @@ def next_non_ignored_index(
             return index
     return None
 
+
 def previous_non_ignored_index(
     instructions: list[Instruction],
     start_index: int,
@@ -2716,6 +2903,7 @@ def previous_non_ignored_index(
         if instructions[index].opname not in IGNORED_BEHAVIOR_OPNAMES:
             return index
     return None
+
 
 def find_repeated_condition_start(
     instructions: list[Instruction],
@@ -2736,6 +2924,7 @@ def find_repeated_condition_start(
         return None
     return previous_index
 
+
 def find_condition_line(
     instructions: list[Instruction],
     cursor: int,
@@ -2745,6 +2934,7 @@ def find_condition_line(
         if line is not None:
             return line
     return None
+
 
 def is_none_load(instruction: Instruction) -> bool:
     if instruction.opname in {"LOAD_CONST", "RETURN_CONST"}:

@@ -1,4 +1,4 @@
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -6,9 +6,11 @@ from typing import Any
 VersionTuple = tuple[int, ...]
 ProgressCallback = Callable[[str], None]
 
+
 def emit_progress(progress: ProgressCallback | None, message: str) -> None:
     if progress is not None:
         progress(message)
+
 
 class LiveWarningList(list[str]):
     def __init__(
@@ -25,9 +27,10 @@ class LiveWarningList(list[str]):
         if self.progress is not None:
             self.progress(f"{self.prefix}{item}")
 
-    def extend(self, items) -> None:
+    def extend(self, items: Iterable[str]) -> None:
         for item in items:
             self.append(item)
+
 
 @dataclass(frozen=True, slots=True)
 class PycHeader:
@@ -38,10 +41,12 @@ class PycHeader:
     source_size: int | None
     raw_size: int
 
+
 @dataclass(frozen=True, slots=True)
 class PycModule:
     header: PycHeader
     code: Any | None
+
 
 @dataclass(frozen=True, slots=True)
 class DecompiledSource:
@@ -49,6 +54,7 @@ class DecompiledSource:
     source: str
     strategy: str
     warnings: tuple[str, ...] = ()
+
 
 @dataclass(slots=True)
 class VerificationReport:

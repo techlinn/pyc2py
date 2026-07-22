@@ -7,11 +7,13 @@ from pyc2py.constants import MAX_CFG_BLOCKS, MAX_CFG_EDGES
 
 EdgeKind = Literal["fallthrough", "jump", "conditional", "exception"]
 
+
 @dataclass(frozen=True, slots=True)
 class CFGEdge:
     source: int
     target: int
     kind: EdgeKind
+
 
 @dataclass(frozen=True, slots=True)
 class BasicBlock:
@@ -315,9 +317,7 @@ def is_conditional_jump(opname: str) -> bool:
 def can_fall_through(instruction: Instruction) -> bool:
     if instruction.opname in TERMINATORS:
         return False
-    if instruction.opname in UNCONDITIONAL_JUMPS:
-        return False
-    return True
+    return instruction.opname not in UNCONDITIONAL_JUMPS
 
 
 def ends_block(instruction: Instruction) -> bool:
@@ -430,10 +430,10 @@ def reversed_graph_with_virtual_exit(graph: ControlFlowGraph) -> ControlFlowGrap
         CFGEdge(source=edge.target, target=edge.source, kind=edge.kind)
         for edge in graph.edges
     ]
-    for offset in exit_offsets(graph):
-        edges.append(
-            CFGEdge(source=VIRTUAL_EXIT_OFFSET, target=offset, kind="jump")
-        )
+    edges.extend(
+        (CFGEdge(source=VIRTUAL_EXIT_OFFSET, target=offset, kind="jump"))
+        for offset in exit_offsets(graph)
+    )
     blocks = (
         *graph.blocks,
         BasicBlock(start_offset=VIRTUAL_EXIT_OFFSET, instructions=()),
@@ -671,15 +671,15 @@ def validate_dominator_sets(
 
 
 def validate_loop_regions(
-    loops: tuple[object, ...],
+    loops: tuple[LoopRegion, ...],
     dominators: dict[int, set[int]],
     block_offsets: set[int],
 ) -> list[str]:
     warnings: list[str] = []
     for loop in loops:
-        header = int(getattr(loop, "header"))
-        latch = int(getattr(loop, "latch"))
-        blocks = frozenset(getattr(loop, "blocks"))
+        header = loop.header
+        latch = loop.latch
+        blocks = loop.blocks
 
         if header not in block_offsets:
             warnings.append(f"CFG loop header is missing: {header}")
@@ -708,7 +708,9 @@ def to_dot(graph: ControlFlowGraph) -> str:
     for block in graph.blocks:
         label = f"{block.start_offset}:{block.end_offset}"
         lines.append(f'  "{block.start_offset}" [label="{label}"];')
-    for edge in graph.edges:
-        lines.append(f'  "{edge.source}" -> "{edge.target}" [label="{edge.kind}"];')
+    lines.extend(
+        f'  "{edge.source}" -> "{edge.target}" [label="{edge.kind}"];'
+        for edge in graph.edges
+    )
     lines.append("}")
     return "\n".join(lines)

@@ -2,17 +2,20 @@ from __future__ import annotations
 
 import ast
 from typing import Any
-from pyc2py.bytecode.opcode_table import normalized_opcode_name
+
 from pyc2py.astree import make_constant, make_name, safe_identifier
 from pyc2py.bytecode.instruction import Instruction
+from pyc2py.bytecode.opcode_table import normalized_opcode_name
+from pyc2py.decompiler.opcode_access_runtime import OpcodeAccessRuntimeMixin
+from pyc2py.decompiler.opcode_call_runtime import OpcodeCallRuntimeMixin
 from pyc2py.decompiler.opcodes.builders import (
     append_to_container,
     extend_container_literal,
     make_const_key_map,
     make_map_from_stack_items,
+    make_sequence,
     make_unpack_map,
     make_unpacked_sequence,
-    make_sequence,
     map_add_to_container,
     update_dict_literal_or_statement,
 )
@@ -53,10 +56,9 @@ from pyc2py.decompiler.runtime import (
     unpack_counts,
     unwrap_lazy_expr,
 )
-from pyc2py.decompiler.opcode_access_runtime import OpcodeAccessRuntimeMixin
-from pyc2py.decompiler.opcode_call_runtime import OpcodeCallRuntimeMixin
 
 STORE_NAME_HANDLED = object()
+
 
 class OpcodeRuntimeMixin(OpcodeCallRuntimeMixin, OpcodeAccessRuntimeMixin):
     def run_instruction(self, instruction: Instruction) -> None:
@@ -79,6 +81,8 @@ class OpcodeRuntimeMixin(OpcodeCallRuntimeMixin, OpcodeAccessRuntimeMixin):
         if result is None:
             target = make_name(name, ast.Store())
             result = ast.Assign(targets=[target], value=coerce_expr(value))
+        if not isinstance(result, ast.stmt):
+            raise TypeError("name store did not produce a statement")
         self.statements.append(result)
 
     def store_name_result(
@@ -173,13 +177,13 @@ class OpcodeRuntimeMixin(OpcodeCallRuntimeMixin, OpcodeAccessRuntimeMixin):
         target = make_name(name, ast.Del())
         self.statements.append(ast.Delete(targets=[target]))
 
-    def store_unpack_slot(self, slot: "UnpackSlot", name: str, opname: str) -> None:
+    def store_unpack_slot(self, slot: UnpackSlot, name: str, opname: str) -> None:
         target = make_name(name, ast.Store())
         if opname == "STORE_DEREF":
-            target._pyc2py_force_tuple_unpack = True
+            setattr(target, "_pyc2py_force_tuple_unpack", True)
         self.store_unpack_target(slot, target)
 
-    def store_unpack_target(self, slot: "UnpackSlot", target: ast.expr) -> None:
+    def store_unpack_target(self, slot: UnpackSlot, target: ast.expr) -> None:
         if slot.group.starred_index == slot.index:
             target = ast.Starred(value=target, ctx=ast.Store())
         slot.group.targets[slot.index] = target
@@ -341,7 +345,7 @@ class OpcodeRuntimeMixin(OpcodeCallRuntimeMixin, OpcodeAccessRuntimeMixin):
         self.stack.append(ast.JoinedStr(values=parts))
 
     def build_interpolation(self, arg: int) -> None:
-        format_value = ast.Constant(value=None)
+        format_value: ast.expr = ast.Constant(value=None)
         if arg & 1:
             format_value = coerce_expr(self.pop_or_none())
         string_value = coerce_expr(self.pop_or_none())
@@ -494,14 +498,14 @@ class OpcodeRuntimeMixin(OpcodeCallRuntimeMixin, OpcodeAccessRuntimeMixin):
         right, left = self.pop_binary()
         expression = ast.BinOp(left=left, op=op_type(), right=right)
         if is_inplace:
-            expression._pyc2py_inplace = True
+            setattr(expression, "_pyc2py_inplace", True)
         self.stack.append(expression)
 
     def legacy_binary_op(self, opname: str) -> None:
         right, left = self.pop_binary()
         expression = ast.BinOp(left=left, op=LEGACY_BINARY_OPS[opname](), right=right)
         if opname.startswith("INPLACE_"):
-            expression._pyc2py_inplace = True
+            setattr(expression, "_pyc2py_inplace", True)
         self.stack.append(expression)
 
     def unary_op(self, op: ast.unaryop) -> None:
@@ -568,8 +572,9 @@ class OpcodeRuntimeMixin(OpcodeCallRuntimeMixin, OpcodeAccessRuntimeMixin):
             args=[value],
             keywords=[],
         )
-        expression._pyc2py_truth_test = True
+        setattr(expression, "_pyc2py_truth_test", True)
         self.stack.append(expression)
+
 
 def make_unpack_assignment_target(targets: list[ast.expr]) -> ast.expr:
     if len(targets) != 2:
@@ -577,6 +582,7 @@ def make_unpack_assignment_target(targets: list[ast.expr]) -> ast.expr:
     if has_attribute_target(targets) or has_forced_tuple_unpack_target(targets):
         return ast.Tuple(elts=targets, ctx=ast.Store())
     return ast.List(elts=targets, ctx=ast.Store())
+
 
 def make_named_value_statement(
     name: str,
@@ -594,6 +600,7 @@ def make_named_value_statement(
     if isinstance(value, ImportedAttributeValue):
         return make_import_from_statement(name, value)
     return make_inplace_name_assignment(name, value)
+
 
 def make_function_store_statement(
     name: str,
@@ -623,9 +630,10 @@ def make_function_store_statement(
         value.kw_defaults,
         value.annotations,
         value.decorators,
-        type_alias_params(value.type_params) or (),
+        tuple(type_alias_params(value.type_params) or ()),
         value.annotate,
     )
+
 
 def make_class_store_statement(
     name: str,
@@ -637,8 +645,9 @@ def make_class_store_statement(
         value.code,
         version,
         value.bases,
-        type_alias_params(value.type_params) or (),
+        tuple(type_alias_params(value.type_params) or ()),
     )
+
 
 def make_inplace_name_assignment(name: str, value: Any) -> ast.AugAssign | None:
     if not getattr(value, "_pyc2py_inplace", False):
@@ -656,8 +665,10 @@ def make_inplace_name_assignment(name: str, value: Any) -> ast.AugAssign | None:
         value=value.right,
     )
 
+
 def has_attribute_target(targets: list[ast.expr]) -> bool:
     return any(contains_attribute_target(target) for target in targets)
+
 
 def contains_attribute_target(target: ast.expr) -> bool:
     if isinstance(target, ast.Attribute):
@@ -668,8 +679,10 @@ def contains_attribute_target(target: ast.expr) -> bool:
         return has_attribute_target(target.elts)
     return False
 
+
 def has_forced_tuple_unpack_target(targets: list[ast.expr]) -> bool:
     return any(contains_forced_tuple_unpack_target(target) for target in targets)
+
 
 def contains_forced_tuple_unpack_target(target: ast.expr) -> bool:
     if bool(getattr(target, "_pyc2py_force_tuple_unpack", False)):
@@ -680,9 +693,11 @@ def contains_forced_tuple_unpack_target(target: ast.expr) -> bool:
         return has_forced_tuple_unpack_target(target.elts)
     return False
 
+
 def make_type_alias_statement(name: str, value: TypeAliasValue) -> ast.stmt:
     params = type_alias_params(value.type_params) or []
     return make_type_alias_statement_with_params(name, value, params)
+
 
 def make_type_alias_statement_with_params(
     name: str,
@@ -697,11 +712,13 @@ def make_type_alias_statement_with_params(
             targets=[ast.Name(id=alias_name, ctx=ast.Store())],
             value=value.value,
         )
-    return ast.TypeAlias(
+    type_alias = getattr(ast, "TypeAlias")
+    return type_alias(
         name=ast.Name(id=alias_name, ctx=ast.Store()),
         type_params=params,
         value=value.value,
     )
+
 
 def make_type_alias_from_generic_function(
     name: str,
@@ -736,6 +753,7 @@ def make_type_alias_from_generic_function(
 
     return None
 
+
 def type_alias_value_from_call(value: ast.expr | None) -> TypeAliasValue | None:
     if not isinstance(value, ast.Call):
         return None
@@ -752,6 +770,7 @@ def type_alias_value_from_call(value: ast.expr | None) -> TypeAliasValue | None:
         type_params=type_alias_call_params(value),
     )
 
+
 def type_alias_call_params(value: ast.Call) -> tuple[ast.expr, ...]:
     for keyword in value.keywords:
         if keyword.arg != "type_params":
@@ -759,6 +778,7 @@ def type_alias_call_params(value: ast.Call) -> tuple[ast.expr, ...]:
         if isinstance(keyword.value, ast.Tuple):
             return tuple(keyword.value.elts)
     return ()
+
 
 def contains_unsupported_type_alias_expr(value: ast.AST) -> bool:
     for node in ast.walk(value):
@@ -770,6 +790,7 @@ def contains_unsupported_type_alias_expr(value: ast.AST) -> bool:
             return True
     return False
 
+
 def type_alias_params(type_params: tuple[ast.expr, ...]) -> list[ast.AST] | None:
     params: list[ast.AST] = []
     for param in type_params:
@@ -779,6 +800,7 @@ def type_alias_params(type_params: tuple[ast.expr, ...]) -> list[ast.AST] | None
         params.append(converted)
     return params
 
+
 def type_alias_param(param: ast.expr) -> ast.AST | None:
     parsed = type_alias_param_call(param)
     if parsed is None:
@@ -787,6 +809,7 @@ def type_alias_param(param: ast.expr) -> ast.AST | None:
     if has_type_param_default(call):
         return None
     return make_type_alias_param_node(func_name, name, call)
+
 
 def type_alias_param_call(param: ast.expr) -> tuple[str, str, ast.Call] | None:
     if not isinstance(param, ast.Call):
@@ -802,10 +825,12 @@ def type_alias_param_call(param: ast.expr) -> tuple[str, str, ast.Call] | None:
         return None
     return param.func.id, name_value.value, param
 
+
 # type parameter and alias AST nodes only exist on host Python 3.12+, so older
 # hosts decompiling newer bytecode fall back to a plain alias assignment
 SUPPORTS_TYPE_PARAMS = hasattr(ast, "TypeVar")
 SUPPORTS_TYPE_ALIAS = hasattr(ast, "TypeAlias")
+
 
 def make_type_alias_param_node(
     func_name: str,
@@ -817,26 +842,30 @@ def make_type_alias_param_node(
     if func_name == "TypeVar":
         return make_type_var_param(name, param)
     if func_name == "ParamSpec":
-        return ast.ParamSpec(name=name)
+        return getattr(ast, "ParamSpec")(name=name)
     if func_name == "TypeVarTuple":
-        return ast.TypeVarTuple(name=name)
+        return getattr(ast, "TypeVarTuple")(name=name)
     return None
 
-def make_type_var_param(name: str, param: ast.Call) -> ast.TypeVar | None:
+
+def make_type_var_param(name: str, param: ast.Call) -> ast.AST | None:
     if has_unsupported_type_param_constraints(param):
         return None
-    return ast.TypeVar(
+    return getattr(ast, "TypeVar")(
         name=name,
         bound=type_param_bound(param),
     )
 
+
 def has_type_param_default(param: ast.Call) -> bool:
     return any(keyword.arg == "default" for keyword in param.keywords)
+
 
 def has_unsupported_type_param_constraints(param: ast.Call) -> bool:
     return len(param.args) > 1 and any(
         type_param_constraint_expr(arg) is None for arg in param.args[1:]
     )
+
 
 def type_param_bound(param: ast.Call) -> ast.expr | None:
     for keyword in param.keywords:
@@ -854,6 +883,7 @@ def type_param_bound(param: ast.Call) -> ast.expr | None:
         )
     return None
 
+
 def type_param_constraint_values(value: ast.expr) -> list[ast.expr]:
     constraint = type_param_constraint_expr(value)
     if constraint is None:
@@ -861,6 +891,7 @@ def type_param_constraint_values(value: ast.expr) -> list[ast.expr]:
     if isinstance(constraint, ast.Tuple):
         return list(constraint.elts)
     return [constraint]
+
 
 def type_param_constraint_expr(value: ast.expr) -> ast.expr | None:
     if isinstance(value, ast.Starred):
