@@ -512,7 +512,7 @@ class OpcodeRuntimeMixin(OpcodeCallRuntimeMixin, OpcodeAccessRuntimeMixin):
         value = coerce_expr(self.pop_or_none())
         self.stack.append(ast.UnaryOp(op=op, operand=value))
 
-    def compare_op(self, symbol: str, force_bool: bool = False) -> None:
+    def compare_op(self, symbol: str) -> None:
         op_type = COMPARE_OPS.get(symbol)
         if op_type is None:
             self.warnings.append(f"unsupported comparison operator: {symbol}")
@@ -520,16 +520,7 @@ class OpcodeRuntimeMixin(OpcodeCallRuntimeMixin, OpcodeAccessRuntimeMixin):
             return
 
         right, left = self.pop_binary()
-        expression: ast.expr = ast.Compare(
-            left=left, ops=[op_type()], comparators=[right]
-        )
-        if force_bool:
-            expression = ast.Call(
-                func=make_name("bool", ast.Load()),
-                args=[expression],
-                keywords=[],
-            )
-        self.stack.append(expression)
+        self.stack.append(ast.Compare(left=left, ops=[op_type()], comparators=[right]))
 
     def format_value(self, flags: int) -> None:
         format_spec = None

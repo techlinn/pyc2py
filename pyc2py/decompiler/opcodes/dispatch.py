@@ -256,10 +256,7 @@ def dispatch_operator_instruction(decompiler: Any, instruction: Instruction) -> 
         return True
 
     if opname == "COMPARE_OP":
-        decompiler.compare_op(
-            str(instruction.argrepr),
-            force_bool=compare_op_forces_bool(instruction, decompiler.version),
-        )
+        decompiler.compare_op(str(instruction.argrepr))
         return True
 
     return dispatch_compare_arg_op(decompiler, opname, instruction.arg)
@@ -296,17 +293,6 @@ def specialized_binary_operator_symbol(opname: str) -> str | None:
     if opname.startswith("BINARY_OP_SUBTRACT_"):
         return "-"
     return None
-
-
-def compare_op_forces_bool(
-    instruction: Instruction,
-    version: tuple[int, ...] | None,
-) -> bool:
-    return (
-        version is not None
-        and version >= (3, 13)
-        and bool(int(instruction.arg or 0) & 0x10)
-    )
 
 
 def load_global_name(decompiler: Any, instruction: Instruction) -> None:

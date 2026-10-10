@@ -94,12 +94,20 @@ def decode_native_instructions(code: CodeType) -> list[Instruction]:
             opname=str(item.opname),
             arg=item.arg,
             argval=item.argval,
-            argrepr=str(item.argrepr),
+            argrepr=native_argrepr(item),
             starts_line=item.starts_line,
             is_jump_target=bool(item.is_jump_target),
         )
         for item in decoded
     ]
+
+
+def native_argrepr(item: dis.Instruction) -> str:
+    # python 3.13+ dis prints a comparison whose result is only used as a truth
+    # value as bool(==), the rest of the decompiler matches on the bare operator
+    if item.opname == "COMPARE_OP":
+        return str(item.argval)
+    return str(item.argrepr)
 
 
 def validate_instruction_objects(instructions: list[Instruction]) -> BytecodeValidation:
