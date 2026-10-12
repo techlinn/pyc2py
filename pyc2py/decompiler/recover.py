@@ -10,42 +10,29 @@ from pyc2py.astree import (
     safe_identifier,
 )
 
+PRIVATE_NAME_FIELDS: dict[type[ast.AST], str] = {
+    ast.Name: "id",
+    ast.Attribute: "attr",
+    ast.arg: "arg",
+    ast.keyword: "arg",
+    ast.FunctionDef: "name",
+    ast.AsyncFunctionDef: "name",
+}
 
-def demangle_class_private_statement(statement: ast.stmt, class_name: str) -> ast.stmt:
+
+def demangle_class_private_names(body: list[ast.stmt], class_name: str) -> None:
     prefix = f"_{class_name.lstrip('_')}__"
-    if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
-        statement.name = demangle_class_private_name(statement.name, prefix)
-        return statement
-    if isinstance(statement, ast.Assign):
-        statement.targets = [
-            demangle_class_private_target(target, prefix)
-            for target in statement.targets
-        ]
-        return statement
-    if isinstance(statement, ast.AnnAssign):
-        target = demangle_class_private_target(statement.target, prefix)
-        if not isinstance(target, (ast.Name, ast.Attribute, ast.Subscript)):
-            raise ValueError("annotated assignment target became invalid")
-        statement.target = target
-        return statement
-    return statement
-
-
-def demangle_class_private_target(target: ast.expr, prefix: str) -> ast.expr:
-    if isinstance(target, ast.Name):
-        target.id = demangle_class_private_name(target.id, prefix)
-        return target
-    if isinstance(target, ast.Tuple):
-        target.elts = [
-            demangle_class_private_target(item, prefix) for item in target.elts
-        ]
-        return target
-    if isinstance(target, ast.List):
-        target.elts = [
-            demangle_class_private_target(item, prefix) for item in target.elts
-        ]
-        return target
-    return target
+    work: list[ast.AST] = list(body)
+    while work:
+        node = work.pop()
+        field = PRIVATE_NAME_FIELDS.get(type(node))
+        name = getattr(node, field, None) if field is not None else None
+        if field is not None and isinstance(name, str):
+            setattr(node, field, demangle_class_private_name(name, prefix))
+        if isinstance(node, ast.ClassDef):
+            work.extend([*node.bases, *node.keywords, *node.decorator_list])
+            continue
+        work.extend(ast.iter_child_nodes(node))
 
 
 def demangle_class_private_name(name: str, prefix: str) -> str:
@@ -120,14 +107,35 @@ CLASS_BOOKKEEPING_NAMES = {
 
 
 def clean_class_body(body: list[ast.stmt], class_name: str) -> list[ast.stmt]:
+    cleaned = without_class_bookkeeping(body)
+    demangle_class_private_names(cleaned, class_name)
+    return cleaned or [ast.Pass()]
+
+
+def without_class_bookkeeping(body: list[ast.stmt]) -> list[ast.stmt]:
     cleaned: list[ast.stmt] = []
     for statement in body:
         if is_class_bookkeeping(statement):
             continue
         if isinstance(statement, ast.Return):
             continue
-        cleaned.append(demangle_class_private_statement(statement, class_name))
-    return cleaned or [ast.Pass()]
+        clean_class_blocks(statement)
+        cleaned.append(statement)
+    return cleaned
+
+
+def clean_class_blocks(statement: ast.stmt) -> None:
+    if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        return
+    for field in ("body", "orelse", "finalbody"):
+        block = getattr(statement, field, None)
+        if block:
+            cleaned = without_class_bookkeeping(block)
+            if not cleaned and field == "body":
+                cleaned = [ast.Pass()]
+            setattr(statement, field, cleaned)
+    for handler in getattr(statement, "handlers", []):
+        handler.body = without_class_bookkeeping(handler.body) or [ast.Pass()]
 
 
 def is_class_bookkeeping(statement: ast.stmt) -> bool:
@@ -241,6 +249,20 @@ CO_VARARGS = 0x04
 CO_VARKEYWORDS = 0x08
 CO_COROUTINE = 0x80
 CO_ASYNC_GENERATOR = 0x200
+CO_FUTURE_ANNOTATIONS = 0x1000000
+
+
+def stores_annotation_text(code: Any) -> bool:
+    return bool(int(getattr(code, "co_flags", 0) or 0) & CO_FUTURE_ANNOTATIONS)
+
+
+def annotation_from_text(value: ast.expr) -> ast.expr:
+    if not isinstance(value, ast.Constant) or not isinstance(value.value, str):
+        return value
+    try:
+        return ast.parse(value.value, mode="eval").body
+    except SyntaxError:
+        return value
 
 
 def make_arguments(code: Any) -> ast.arguments:

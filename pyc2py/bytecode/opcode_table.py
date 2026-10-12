@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from functools import cache
 from importlib import import_module
 
 HAVE_ARGUMENT = 90
@@ -179,6 +180,8 @@ CANONICAL_CALL_OPS = {
     "CALL_METHOD",
 }
 NORMALIZED_OPCODE_NAMES = {
+    "CALL_FINALLY": "CALL_FINALLY",
+    "JUMP_BACKWARD_NO_INTERRUPT": "JUMP_BACKWARD_NO_INTERRUPT",
     "INSTRUMENTED_INSTRUCTION": "NOP",
     "INSTRUMENTED_LINE": "NOP",
     "LOAD_CONST__LOAD_FAST": "LOAD_CONST_LOAD_FAST",
@@ -211,6 +214,7 @@ NORMALIZED_OPCODE_PREFIXES = (
     ("UNPACK_SEQUENCE_", "UNPACK_SEQUENCE"),
 )
 RELATIVE_JUMPS = {
+    "CALL_FINALLY",
     "FOR_ITER",
     "FOR_LOOP",
     "JUMP_BACKWARD",
@@ -229,9 +233,11 @@ RELATIVE_JUMPS = {
     "POP_JUMP_IF_NONE",
     "POP_JUMP_IF_NOT_NONE",
     "SEND",
+    "SETUP_ASYNC_WITH",
     "SETUP_EXCEPT",
     "SETUP_FINALLY",
     "SETUP_LOOP",
+    "SETUP_WITH",
 }
 ABSOLUTE_JUMPS = {
     "CONTINUE_LOOP",
@@ -259,7 +265,11 @@ class OpcodeTable:
 
 
 def get_opcode_table(version: tuple[int, ...]) -> OpcodeTable:
-    resolved_version = resolve_supported_version(version)
+    return cached_opcode_table(resolve_supported_version(version))
+
+
+@cache
+def cached_opcode_table(resolved_version: tuple[int, int]) -> OpcodeTable:
     module = import_module(version_module_name(resolved_version))
 
     return build_opcode_table(module.OPMAP, resolved_version)
@@ -361,6 +371,12 @@ def argument_opcodes(opmap: dict[int, str], version: tuple[int, int]) -> frozens
 
 def argument_opcode_names(version: tuple[int, int]) -> set[str]:
     names = set(ARG_OPS)
+    if version >= (3, 13):
+        names.add("RESUME")
+        names.discard("MAKE_FUNCTION")
+    if version >= (3, 14):
+        names.add("END_ASYNC_FOR")
+        names.discard("CALL_FUNCTION_EX")
     if version >= (3, 15):
         names.add("GET_ITER")
 

@@ -1,5 +1,6 @@
 from collections.abc import Sequence
 from dataclasses import dataclass, field
+from functools import lru_cache
 
 from pyc2py.bytecode.instruction import Instruction
 from pyc2py.constants import MAX_CFG_EDGES
@@ -24,6 +25,7 @@ class ExceptionTableValidation:
         return (f"exception table entry count: {self.entry_count}",)
 
 
+@lru_cache(maxsize=64)
 def parse_exception_table(
     data: bytes, max_entries: int = MAX_CFG_EDGES
 ) -> tuple[ExceptionTableEntry, ...]:
@@ -76,7 +78,12 @@ def validate_exception_table(
     instruction_offsets: set[int],
     code_size: int,
 ) -> ExceptionTableValidation:
-    entries = parse_exception_table(data)
+    try:
+        entries = parse_exception_table(data)
+    except ValueError as error:
+        return ExceptionTableValidation(
+            entry_count=0, warnings=[f"exception table is malformed: {error}"]
+        )
     warnings: list[str] = []
     previous_start = -1
 
@@ -182,11 +189,88 @@ def validate_line_entries(instructions: list[Instruction]) -> LineValidation:
     return LineValidation(entry_count=len(entries), warnings=warnings)
 
 
+def location_table_line_starts(data: bytes, first_line: int) -> dict[int, int]:
+    starts: dict[int, int] = {}
+    line = first_line
+    previous_line: int | None = None
+    offset = 0
+    position = 0
+
+    while position < len(data):
+        first_byte = data[position]
+        position += 1
+        kind = (first_byte >> 3) & 0x0F
+        length = (first_byte & 0x07) + 1
+        current: int | None = line
+
+        if kind == 15:
+            current = None
+        elif kind == 14:
+            delta, position = read_location_signed_varint(data, position)
+            line += delta
+            current = line
+            for _field in range(3):
+                _value, position = read_location_varint(data, position)
+        elif kind == 13:
+            delta, position = read_location_signed_varint(data, position)
+            line += delta
+            current = line
+        elif kind >= 10:
+            line += kind - 10
+            current = line
+            position += 2
+        else:
+            position += 1
+
+        if position > len(data):
+            raise ValueError("truncated location table entry")
+        if current is not None and current != previous_line:
+            starts[offset] = current
+        previous_line = current
+        offset += length * 2
+
+    return starts
+
+
+def read_location_varint(data: bytes, position: int) -> tuple[int, int]:
+    value = 0
+    shift = 0
+    while True:
+        if position >= len(data):
+            raise ValueError("truncated location table varint")
+        byte = data[position]
+        position += 1
+        value |= (byte & 0x3F) << shift
+        shift += 6
+        if not byte & 0x40:
+            return value, position
+
+
+def read_location_signed_varint(data: bytes, position: int) -> tuple[int, int]:
+    value, position = read_location_varint(data, position)
+    if value & 1:
+        return -(value >> 1), position
+    return value >> 1, position
+
+
 IGNORABLE_OPS = frozenset({"CACHE", "SET_LINENO", "NOP"})
 
 
 def make_offset_index(instructions: Sequence[Instruction]) -> dict[int, int]:
-    return {instruction.offset: index for index, instruction in enumerate(instructions)}
+    offset_index: dict[int, int] = {}
+    next_offset = 0
+    for index, instruction in enumerate(instructions):
+        for offset in range(next_offset, instruction.offset):
+            offset_index[offset] = index
+        offset_index[instruction.offset] = index
+        next_offset = instruction.offset + 1
+    return offset_index
+
+
+def line_in_effect(instructions: Sequence[Instruction], index: int) -> int | None:
+    while index > 0 and instructions[index].starts_line is None:
+        index -= 1
+    return instructions[index].starts_line
 
 
 def skip_ignorable_instructions(

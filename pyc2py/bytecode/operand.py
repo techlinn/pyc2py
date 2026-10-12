@@ -152,7 +152,7 @@ def resolve_indexed_arg(
             getattr(code, "co_names", ()), name_index(opname, arg, version)
         )
     if opcode in getattr(opcode_table, "haslocal", ()):
-        return read_indexed(getattr(code, "co_varnames", ()), arg)
+        return read_indexed(local_names(code, version), arg)
     if opcode in getattr(opcode_table, "hasfree", ()):
         return read_indexed(free_names(code, version), arg)
     if opcode in getattr(opcode_table, "hascompare", ()):
@@ -289,6 +289,14 @@ def free_names(
     )
 
 
+def local_names(code: Any, version: tuple[int, ...] | None = None) -> tuple[Any, ...]:
+    # python 3.11+ numbers locals, cells and free variables in one table, and
+    # 3.13 loads a cell with LOAD_FAST, so the index can point past co_varnames
+    if version is not None and version >= (3, 11):
+        return free_names(code, version)
+    return tuple(getattr(code, "co_varnames", ()) or ())
+
+
 def name_index(opname: str, arg: int, version: tuple[int, ...]) -> int:
     opname = normalized_opcode_name(opname)
 
@@ -382,9 +390,13 @@ def format_argrepr(opname: str, argval: Any) -> str:
 
     if "JUMP" in normalized_opname or normalized_opname in {
         "FOR_ITER",
+        "SEND",
         "SETUP_LOOP",
         "SETUP_EXCEPT",
         "SETUP_FINALLY",
+        "SETUP_WITH",
+        "SETUP_ASYNC_WITH",
+        "CALL_FINALLY",
     }:
         return f"to {argval}"
 

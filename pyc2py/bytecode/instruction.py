@@ -20,3 +20,4 @@ class Instruction:
     argrepr: str
     starts_line: int | None
     is_jump_target: bool
+    borrowed: bool = False

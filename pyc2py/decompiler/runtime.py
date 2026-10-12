@@ -1,20 +1,36 @@
 import ast
+from collections.abc import Iterable
 from dataclasses import dataclass
+from itertools import pairwise
 from typing import Any
 
 from pyc2py.astree import (
     expression_key,
     make_name,
+    mark_line,
     safe_identifier,
 )
 from pyc2py.bytecode.decoder import decode_instructions
 from pyc2py.bytecode.instruction import Instruction
-from pyc2py.bytecode.metadata import make_offset_index, skip_ignorable_instructions
+from pyc2py.bytecode.metadata import (
+    line_in_effect,
+    make_offset_index,
+    skip_ignorable_instructions,
+)
 from pyc2py.decompiler.opcodes.imports_calls import (
     ImportedAttributeValue,
     ImportValue,
 )
 from pyc2py.decompiler.opcodes.values import is_code_constant
+from pyc2py.decompiler.recover import (
+    annotation_from_text,
+    make_dict_comp,
+    make_generator,
+    make_generator_exp,
+    make_list_comp,
+    make_set_comp,
+    stores_annotation_text,
+)
 from pyc2py.decompiler.recover import (
     make_arguments as recover_make_arguments,
 )
@@ -22,19 +38,30 @@ from pyc2py.decompiler.recover import (
     make_class_node as recover_make_class_node,
 )
 from pyc2py.decompiler.recover import (
-    make_dict_comp,
-    make_generator,
-    make_generator_exp,
-    make_list_comp,
-    make_set_comp,
-)
-from pyc2py.decompiler.recover import (
     make_function_node as recover_make_function_node,
 )
 from pyc2py.decompiler.recover import (
     with_code_docstring as recover_with_code_docstring,
 )
-from pyc2py.decompiler.structures import invert_condition
+from pyc2py.decompiler.structures import (
+    condition_from_jump,
+    invert_condition,
+    is_false_jump,
+    is_forward_conditional_jump,
+    unwrap_truth_test,
+)
+
+CO_HAS_DOCSTRING = 0x4000000
+
+
+def has_code_docstring(code: Any, version: tuple[int, ...] | None) -> bool:
+    # up to python 3.13 the first constant of a function is its docstring or
+    # None. 3.14 only keeps a first constant for a docstring when there is
+    # one and says so with a flag; without the flag a string in front is just
+    # the first constant the body uses
+    if version is None or version < (3, 14):
+        return True
+    return bool(int(getattr(code, "co_flags", 0) or 0) & CO_HAS_DOCSTRING)
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,6 +86,8 @@ class ClassValue:
     code: Any
     bases: tuple[ast.expr, ...]
     type_params: tuple[ast.expr, ...] = ()
+    keywords: tuple[ast.keyword, ...] = ()
+    decorators: tuple[ast.expr, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,6 +124,7 @@ class UnpackGroup:
     value: ast.expr
     targets: list[ast.expr | None]
     starred_index: int | None = None
+    parent: UnpackSlot | None = None
 
 
 def decompile_native_source(code: Any, version: tuple[int, ...] | None) -> Any | None:
@@ -132,9 +162,13 @@ def make_function_def(
     body_result = NativeDecompiler(
         code=code, version=version, is_module=False
     ).decompile()
-    body_module = parse_body_or_empty(body_result)
-    body = recover_with_code_docstring(code, body_module.body or [ast.Pass()])
+    body_warnings = list(result_warnings(body_result))
+    body_module = parse_body_or_empty(body_result, body_warnings)
+    body = body_module.body or [ast.Pass()]
+    if has_code_docstring(code, version):
+        body = recover_with_code_docstring(code, body)
     function = recover_make_function_node(name, code, body)
+    mark_scope_warnings(function, name, body_warnings)
     function.args.defaults = list(defaults)
     if kw_defaults:
         function.args.kw_defaults = [
@@ -166,7 +200,12 @@ def function_annotations_from_code(
     module = parse_body_or_empty(result)
     for statement in module.body:
         if isinstance(statement, ast.Return) and isinstance(statement.value, ast.Dict):
-            return annotation_dict_from_ast_dict_literal(statement.value)
+            annotations = annotation_dict_from_ast_dict_literal(statement.value)
+            if annotations is None or not stores_annotation_text(code):
+                return annotations
+            return {
+                name: annotation_from_text(value) for name, value in annotations.items()
+            }
     return None
 
 
@@ -224,19 +263,36 @@ def make_class_def(
     version: tuple[int, ...] | None,
     bases: tuple[ast.expr, ...],
     type_params: tuple[ast.AST, ...] = (),
+    keywords: tuple[ast.keyword, ...] = (),
+    decorators: tuple[ast.expr, ...] = (),
 ) -> ast.ClassDef:
     from pyc2py.decompiler.engine import NativeDecompiler
 
     body_result = NativeDecompiler(
         code=code, version=version, is_module=False
     ).decompile()
-    body_module = parse_body_or_empty(body_result)
+    body_warnings = list(result_warnings(body_result))
+    body_module = parse_body_or_empty(body_result, body_warnings)
     class_node = recover_make_class_node(name, bases, body_module.body)
+    mark_scope_warnings(class_node, name, body_warnings)
     setattr(class_node, "type_params", list(type_params))
+    class_node.keywords = list(keywords)
+    class_node.decorator_list = list(decorators)
     return class_node
 
 
-def make_class_value(arguments: list[Any], version: tuple[int, ...] | None) -> Any:
+def make_class_value(
+    arguments: list[Any],
+    version: tuple[int, ...] | None,
+    kw_names: tuple[str, ...] = (),
+) -> Any:
+    keywords: tuple[ast.keyword, ...] = ()
+    if kw_names and len(kw_names) <= len(arguments) - 2:
+        keywords = tuple(
+            ast.keyword(arg=name, value=coerce_expr(value))
+            for name, value in zip(kw_names, arguments[-len(kw_names) :], strict=True)
+        )
+        arguments = arguments[: -len(kw_names)]
     if len(arguments) < 2:
         return ast.Constant(value=None)
 
@@ -250,7 +306,26 @@ def make_class_value(arguments: list[Any], version: tuple[int, ...] | None) -> A
         return ast.Constant(value=None)
 
     bases = make_class_bases(arguments[2:], version)
-    return ClassValue(code=function.code, bases=bases)
+    return ClassValue(code=function.code, bases=bases, keywords=keywords)
+
+
+FUNCTION_VALUE_MARK = "_pyc2py_function_value"
+
+
+def make_unpacked_class_value(
+    arguments: ast.expr,
+    keywords: list[ast.keyword],
+) -> ClassValue | None:
+    if not isinstance(arguments, ast.Tuple) or len(arguments.elts) < 2:
+        return None
+    function = getattr(arguments.elts[0], FUNCTION_VALUE_MARK, None)
+    if not isinstance(function, FunctionValue):
+        return None
+    return ClassValue(
+        code=function.code,
+        bases=tuple(arguments.elts[2:]),
+        keywords=tuple(keywords),
+    )
 
 
 def make_class_bases(
@@ -274,10 +349,14 @@ def make_lambda_expr(
     child = NativeDecompiler(code=code, version=version, is_module=False)
     instructions = decode_instructions(code, version)
     statements = child.translate_range(instructions, 0, len(instructions))
+    body: ast.expr = ast.Constant(value=None)
     for statement in statements:
         if isinstance(statement, ast.Return) and statement.value is not None:
-            return make_lambda_node(code, statement.value, defaults, kw_defaults)
-    return make_lambda_node(code, ast.Constant(value=None), defaults, kw_defaults)
+            body = statement.value
+            break
+    node = make_lambda_node(code, body, defaults, kw_defaults)
+    mark_scope_warnings(node, "<lambda>", child.warnings)
+    return node
 
 
 def make_lambda_node(
@@ -319,6 +398,12 @@ def make_generator_expr(
     )
     if async_generator is not None:
         return async_generator
+    if version is not None and version < (3, 13):
+        read = make_function_comprehension(
+            code, iterable, version, instructions, load_iterator_index + 1
+        )
+        if isinstance(read, ast.GeneratorExp):
+            return read
 
     shape = read_comprehension_loop_shape(
         instructions,
@@ -345,6 +430,11 @@ def make_sync_generator_expr(
     )
     if yield_index is None:
         return None
+
+    if has_test_inside_element(instructions, shape, yield_index):
+        structured = make_structured_generator_expr(code, iterable, version)
+        if structured is not None:
+            return structured
 
     generators = [make_generator(target=shape.target, iterator=iterable)]
     expression_scan_start = shape.store_index + 1
@@ -379,6 +469,64 @@ def make_sync_generator_expr(
     return make_generator_exp(element, generators)
 
 
+def has_test_inside_element(
+    instructions: list[Instruction],
+    shape: ComprehensionLoopShape,
+    yield_index: int,
+) -> bool:
+    loop_offset = int(instructions[shape.for_iter_index].offset)
+    for index in range(shape.store_index + 1, yield_index):
+        if not is_forward_conditional_jump(instructions[index]):
+            continue
+        following = instructions[index + 1]
+        if following.opname != "JUMP_BACKWARD" or following.argval != loop_offset:
+            return True
+    return False
+
+
+def make_structured_generator_expr(
+    code: Any,
+    iterable: ast.expr,
+    version: tuple[int, ...] | None,
+) -> ast.GeneratorExp | None:
+    from pyc2py.decompiler.engine import NativeDecompiler
+
+    child = NativeDecompiler(code=code, version=version, is_module=False)
+    instructions = decode_instructions(code, version)
+    body = child.translate_range(instructions, 0, len(instructions))
+    if body and isinstance(body[-1], ast.Return):
+        body = body[:-1]
+    generators: list[ast.comprehension] = []
+    while len(body) == 1 and isinstance(body[0], ast.For) and not body[0].orelse:
+        loop = body[0]
+        generators.append(make_generator(target=loop.target, iterator=loop.iter))
+        body = read_generator_tests(loop.body, generators[-1])
+    if not generators or len(body) != 1 or not isinstance(body[0], ast.Expr):
+        return None
+    element = body[0].value
+    if not isinstance(element, ast.Yield) or element.value is None:
+        return None
+    generators[0].iter = iterable
+    return make_generator_exp(element.value, generators)
+
+
+def read_generator_tests(
+    body: list[ast.stmt],
+    generator: ast.comprehension,
+) -> list[ast.stmt]:
+    while body and isinstance(body[0], ast.If) and not body[0].orelse:
+        test = body[0]
+        if len(test.body) == 1 and isinstance(test.body[0], ast.Continue):
+            generator.ifs.append(invert_condition(test.test))
+            body = body[1:]
+        elif len(body) == 1:
+            generator.ifs.append(test.test)
+            body = test.body
+        else:
+            break
+    return body
+
+
 def make_comprehension_expr(
     code: Any,
     iterable: ast.expr,
@@ -395,6 +543,10 @@ def make_comprehension_expr(
     load_iterator_index = find_generator_iterator_load(instructions)
     if load_iterator_index is None:
         return None
+    if version is not None and version < (3, 12):
+        return make_function_comprehension(
+            code, iterable, version, instructions, load_iterator_index + 1
+        )
 
     shape = read_comprehension_loop_shape(
         instructions,
@@ -404,6 +556,37 @@ def make_comprehension_expr(
     if shape is None:
         return None
     return make_sync_comprehension_expr(code, iterable, version, code_name, shape)
+
+
+def make_function_comprehension(
+    code: Any,
+    iterable: ast.expr,
+    version: tuple[int, ...],
+    instructions: list[Instruction],
+    for_iter_index: int,
+) -> ast.expr | None:
+    from pyc2py.decompiler.engine import NativeDecompiler
+
+    child = NativeDecompiler(code=code, version=version, is_module=False)
+    offset_to_index = make_offset_index(instructions)
+    value: ast.expr | None = None
+    if instructions[for_iter_index].opname == "FOR_ITER":
+        value = child.make_function_comprehension(
+            instructions, offset_to_index, for_iter_index, iterable
+        )
+    elif instructions[for_iter_index].opname == "GET_ANEXT":
+        value = child.make_async_function_comprehension(
+            instructions,
+            offset_to_index,
+            for_iter_index,
+            unwrap_async_iterator_call(iterable),
+        )
+    if value is not None and is_coroutine_code(code):
+        setattr(value, AWAITED_BY_CALLER_MARK, True)
+    return value
+
+
+AWAITED_BY_CALLER_MARK = "_pyc2py_awaited_by_caller"
 
 
 def make_sync_comprehension_expr(
@@ -466,6 +649,10 @@ def read_comprehension_loop_shape(
     )
     if for_iter_index >= len(instructions):
         return None
+    if instructions[for_iter_index].opname == "GET_ITER":
+        for_iter_index += 1
+        if for_iter_index >= len(instructions):
+            return None
     for_iter = instructions[for_iter_index]
     if for_iter.opname != "FOR_ITER":
         return None
@@ -483,6 +670,8 @@ def read_comprehension_loop_shape(
         return None
 
     target = comprehension_target_from_store(instructions, store_index)
+    if target is not None:
+        mark_line(target, line_in_effect(instructions, store_index))
     if target is None:
         return None
     return ComprehensionLoopShape(
@@ -764,6 +953,10 @@ def read_nested_generator_loop_shape(
     )
     if for_iter_index >= yield_index:
         return None
+    if instructions[for_iter_index].opname == "GET_ITER":
+        for_iter_index += 1
+        if for_iter_index >= yield_index:
+            return None
     for_iter = instructions[for_iter_index]
     if for_iter.opname != "FOR_ITER":
         return None
@@ -821,7 +1014,16 @@ def read_generator_conditions(
         )
         if condition is None:
             return start_index, []
-        if "IF_FALSE" in instructions[jump_index].opname:
+        condition = unwrap_truth_test(condition)
+        jump_opname = instructions[jump_index].opname
+        condition = condition_from_jump(jump_opname, condition)
+        if is_backward_condition_jump(instructions[jump_index], loop_offset):
+            if not is_false_jump(jump_opname):
+                condition = invert_condition(condition)
+            conditions.append(condition)
+            cursor = jump_index + 1
+            continue
+        if is_false_jump(jump_opname):
             condition = invert_condition(condition)
         conditions.append(condition)
 
@@ -844,9 +1046,9 @@ def find_generator_condition_jump(
 ) -> int | None:
     for index in range(start_index, yield_index):
         instruction = instructions[index]
-        if "JUMP" not in instruction.opname:
-            continue
-        if "IF_TRUE" not in instruction.opname and "IF_FALSE" not in instruction.opname:
+        if is_backward_condition_jump(instruction, loop_offset):
+            return index
+        if not is_forward_conditional_jump(instruction):
             continue
         next_index = skip_ignorable_instructions(instructions, index + 1, yield_index)
         if next_index >= yield_index:
@@ -858,6 +1060,13 @@ def find_generator_condition_jump(
             continue
         return index
     return None
+
+
+def is_backward_condition_jump(instruction: Instruction, loop_offset: int) -> bool:
+    return (
+        instruction.opname.startswith("POP_JUMP_BACKWARD_IF_")
+        and instruction.argval == loop_offset
+    )
 
 
 def evaluate_generator_expression(
@@ -876,6 +1085,9 @@ def evaluate_generator_expression(
     )
     if conditional is not None:
         return conditional
+    chain = evaluate_compare_chain(code, version, instructions, start_index, end_index)
+    if chain is not None:
+        return chain
 
     values = evaluate_expression_stack(
         code,
@@ -887,6 +1099,27 @@ def evaluate_generator_expression(
     if not values:
         return None
     return values[-1]
+
+
+def evaluate_compare_chain(
+    code: Any,
+    version: tuple[int, ...] | None,
+    instructions: list[Instruction],
+    start_index: int,
+    end_index: int,
+) -> ast.expr | None:
+    from pyc2py.decompiler.engine import NativeDecompiler
+
+    if not any(
+        first.opname == "SWAP" and second.opname == "COPY"
+        for first, second in pairwise(instructions[start_index:end_index])
+    ):
+        return None
+    child = NativeDecompiler(code=code, version=version, is_module=False)
+    value: ast.expr | None = child.evaluate_expression_range(
+        instructions, start_index, end_index
+    )
+    return value
 
 
 def evaluate_conditional_expression(
@@ -997,7 +1230,9 @@ def evaluate_expression_stack(
 
     if len(child.stack) <= starting_depth:
         return []
-    return [coerce_expr(value) for value in child.stack[starting_depth:]]
+    values = [coerce_expr(value) for value in child.stack[starting_depth:]]
+    mark_scope_warnings(values[-1], str(code.co_name), child.warnings)
+    return values
 
 
 def run_expression_jump(
@@ -1096,13 +1331,50 @@ def make_type_alias_call_expr(value: TypeAliasValue) -> ast.Call:
     )
 
 
-def parse_body_or_empty(result: Any | None) -> ast.Module:
+SCOPE_WARNINGS_MARK = "_pyc2py_scope_warnings"
+
+
+def result_warnings(result: Any | None) -> tuple[str, ...]:
+    return () if result is None else tuple(result.warnings)
+
+
+def mark_scope_warnings(node: ast.AST, scope: str, warnings: Iterable[str]) -> None:
+    marked = tuple(f"{scope}: {warning}" for warning in warnings)
+    if marked:
+        previous = getattr(node, SCOPE_WARNINGS_MARK, ())
+        setattr(node, SCOPE_WARNINGS_MARK, (*previous, *marked))
+
+
+def take_scope_warnings(body: list[ast.stmt]) -> list[str]:
+    taken: list[str] = []
+    for statement in body:
+        for node in ast.walk(statement):
+            marked = getattr(node, SCOPE_WARNINGS_MARK, None)
+            if marked is None:
+                continue
+            delattr(node, SCOPE_WARNINGS_MARK)
+            taken.extend(warning for warning in marked if warning not in taken)
+    return taken
+
+
+def parse_body_or_empty(
+    result: Any | None,
+    warnings: list[str] | None = None,
+) -> ast.Module:
     if result is None:
         return ast.Module(body=[], type_ignores=[])
     try:
-        return ast.parse(result.source)
-    except SyntaxError:
+        parsed = ast.parse(result.source)
+    except SyntaxError as error:
+        if warnings is not None:
+            warnings.append(
+                f"recovered body is not valid Python and was dropped: {error.msg}"
+            )
         return ast.Module(body=[], type_ignores=[])
+    body = getattr(result, "body", None)
+    if body is None:
+        return parsed
+    return ast.Module(body=list(body), type_ignores=[])
 
 
 def is_coroutine_code(code: Any) -> bool:

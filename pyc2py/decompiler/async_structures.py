@@ -158,6 +158,19 @@ def find_modern_async_for_loop_pattern(
         cleanup_index,
         end_index,
     )
+    if after_index is None and has_out_of_line_async_for_end(
+        instructions,
+        cleanup_index,
+        end_index,
+    ):
+        after_index = cleanup_index
+    if after_index is None:
+        after_index = find_async_for_end_behind_handlers(
+            instructions,
+            cleanup_index,
+            instructions[end_send_index].offset,
+            end_index,
+        )
     if after_index is None:
         return None
 
@@ -167,6 +180,51 @@ def find_modern_async_for_loop_pattern(
         body_end_index=body_end_index,
         after_index=after_index,
     )
+
+
+def find_async_for_end_behind_handlers(
+    instructions: list[Instruction],
+    cleanup_index: int,
+    end_send_offset: int,
+    end_index: int,
+) -> int | None:
+    for index in range(cleanup_index, end_index - 2):
+        if not is_throw_path(instructions, index):
+            continue
+        if instructions[index + 1].argval != end_send_offset:
+            continue
+        end = index + 2
+        while end + 2 < end_index and is_throw_path(instructions, end):
+            end += 2
+        if instructions[end].opname == "END_ASYNC_FOR":
+            return end + 1
+    return None
+
+
+def is_throw_path(instructions: list[Instruction], index: int) -> bool:
+    return instructions[index].opname == "CLEANUP_THROW" and (
+        instructions[index + 1].opname
+        in {"JUMP_BACKWARD", "JUMP_BACKWARD_NO_INTERRUPT"}
+    )
+
+
+def has_out_of_line_async_for_end(
+    instructions: list[Instruction],
+    after_index: int,
+    end_index: int,
+) -> bool:
+    if after_index >= end_index:
+        return False
+    after_offset = instructions[after_index].offset
+    for index in range(after_index, end_index - 1):
+        if instructions[index].opname != "END_ASYNC_FOR":
+            continue
+        jump = instructions[index + 1]
+        if jump.opname not in {"JUMP_BACKWARD", "JUMP_BACKWARD_NO_INTERRUPT"}:
+            continue
+        if jump.argval == after_offset:
+            return True
+    return False
 
 
 def find_async_for_header(

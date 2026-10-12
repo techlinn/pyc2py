@@ -215,7 +215,12 @@ class MarshalReader(MarshalCodeReaderMixin):
 
 def load_marshal_code(data: bytes, version: tuple[int, ...]) -> PycCode:
     reader = MarshalReader(data, version)
-    value, offset = reader.read_object(0)
+    try:
+        value, offset = reader.read_object(0)
+    except RecursionError as error:
+        raise ValueError("marshal object graph is too deep") from error
+    except TypeError as error:
+        raise ValueError(f"marshal payload is malformed: {error}") from error
 
     if not isinstance(value, PycCode):
         raise ValueError("marshal payload did not contain a code object")

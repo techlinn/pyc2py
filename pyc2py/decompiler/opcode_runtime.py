@@ -3,7 +3,14 @@ from __future__ import annotations
 import ast
 from typing import Any
 
-from pyc2py.astree import make_constant, make_name, safe_identifier
+from pyc2py.astree import (
+    make_assertion_error_name,
+    make_constant,
+    make_name,
+    mark_default_lines,
+    mark_line,
+    safe_identifier,
+)
 from pyc2py.bytecode.instruction import Instruction
 from pyc2py.bytecode.opcode_table import normalized_opcode_name
 from pyc2py.decompiler.opcode_access_runtime import OpcodeAccessRuntimeMixin
@@ -56,8 +63,17 @@ from pyc2py.decompiler.runtime import (
     unpack_counts,
     unwrap_lazy_expr,
 )
+from pyc2py.decompiler.structures import unwrap_truth_test
 
 STORE_NAME_HANDLED = object()
+LINE_START_LOADS = {
+    "LOAD_CONST",
+    "LOAD_DEREF",
+    "LOAD_FAST",
+    "LOAD_GLOBAL",
+    "LOAD_NAME",
+    "LOAD_SMALL_INT",
+}
 
 
 class OpcodeRuntimeMixin(OpcodeCallRuntimeMixin, OpcodeAccessRuntimeMixin):
@@ -65,6 +81,25 @@ class OpcodeRuntimeMixin(OpcodeCallRuntimeMixin, OpcodeAccessRuntimeMixin):
         if instruction.starts_line is not None or instruction.opname == "SET_LINENO":
             self.flush_legacy_line_boundary()
         dispatch_instruction(self, instruction)
+        if instruction.opname in LINE_START_LOADS and self.stack:
+            value = self.stack[-1]
+            if isinstance(value, (ast.Constant, ast.Name)):
+                mark_line(value, instruction.starts_line)
+        self.note_nop_line(instruction)
+
+    def note_nop_line(self, instruction: Instruction) -> None:
+        if instruction.opname in {"CACHE", "EXTENDED_ARG"}:
+            return
+        if instruction.opname == "NOP":
+            if instruction.starts_line is not None:
+                self.nop_lines.append(instruction.starts_line)
+            return
+        folded = instruction.opname == "LOAD_CONST" and isinstance(
+            instruction.argval, tuple
+        )
+        if folded and self.nop_lines and self.stack:
+            mark_default_lines(self.stack[-1], self.nop_lines, instruction.starts_line)
+        self.nop_lines = []
 
     def build_class_marker(self) -> BuildClassValue:
         return BuildClassValue()
@@ -73,17 +108,21 @@ class OpcodeRuntimeMixin(OpcodeCallRuntimeMixin, OpcodeAccessRuntimeMixin):
         if opname == "STORE_GLOBAL":
             self.add_global_name(safe_identifier(name))
 
-        value = self.pop_or_none()
+        value = self.release_copied_store(self.pop_or_none())
+        if self.keep_copied_store(name, value):
+            return
         result = self.store_name_result(name, opname, value)
 
         if result is STORE_NAME_HANDLED:
+            if self.pending_simultaneous_store_count > 0:
+                self.pending_simultaneous_store_count -= 1
             return
         if result is None:
             target = make_name(name, ast.Store())
             result = ast.Assign(targets=[target], value=coerce_expr(value))
         if not isinstance(result, ast.stmt):
             raise TypeError("name store did not produce a statement")
-        self.statements.append(result)
+        self.append_store_statement(result)
 
     def store_name_result(
         self,
@@ -128,8 +167,10 @@ class OpcodeRuntimeMixin(OpcodeCallRuntimeMixin, OpcodeAccessRuntimeMixin):
         self.stack.append(make_constant(const_value))
 
     def load_common_constant(self, value: Any) -> None:
+        if value == "AssertionError":
+            self.stack.append(make_assertion_error_name())
+            return
         if value in {
-            "AssertionError",
             "NotImplementedError",
             "tuple",
             "all",
@@ -192,6 +233,13 @@ class OpcodeRuntimeMixin(OpcodeCallRuntimeMixin, OpcodeAccessRuntimeMixin):
             return
 
         targets = [target for target in slot.group.targets if target is not None]
+        name_dropped_unpack_targets(targets)
+        if slot.group.parent is not None:
+            self.store_unpack_target(
+                slot.group.parent,
+                ast.Tuple(elts=targets, ctx=ast.Store()),
+            )
+            return
         self.statements.append(
             ast.Assign(
                 targets=[make_unpack_assignment_target(targets)],
@@ -201,6 +249,9 @@ class OpcodeRuntimeMixin(OpcodeCallRuntimeMixin, OpcodeAccessRuntimeMixin):
 
     def pop_expression_statement(self) -> None:
         value = self.pop_or_none()
+        if isinstance(value, UnpackSlot):
+            self.store_unpack_target(value, make_dropped_unpack_target())
+            return
 
         if self.pending_print_items or self.pending_print_target is not None:
             self.flush_print_items(newline=False)
@@ -226,7 +277,14 @@ class OpcodeRuntimeMixin(OpcodeCallRuntimeMixin, OpcodeAccessRuntimeMixin):
             value = make_constant(instruction.argval)
         else:
             value = self.expression_from_stack_value(self.pop_or_none())
-        self.statements.append(ast.Return(value=value))
+        statement = ast.Return(value=value)
+        if instruction.offset in self.implicit_return_offsets:
+            setattr(statement, "_pyc2py_implicit_return", True)
+        elif (
+            instruction.opname == "RETURN_CONST" and instruction.is_jump_target
+        ) or instruction.offset in self.written_return_offsets:
+            setattr(statement, "_pyc2py_written_return", True)
+        self.statements.append(statement)
 
     def is_none_return(self, instruction: Instruction) -> bool:
         if normalized_opcode_name(instruction.opname) == "RETURN_CONST":
@@ -307,7 +365,8 @@ class OpcodeRuntimeMixin(OpcodeCallRuntimeMixin, OpcodeAccessRuntimeMixin):
         )
 
     def unpack_sequence(self, instruction: Instruction) -> None:
-        value = coerce_expr(self.pop_or_none())
+        raw_value = self.pop_or_none()
+        value = coerce_expr(raw_value)
         count, starred_index = unpack_counts(instruction)
 
         if count == 0:
@@ -320,7 +379,10 @@ class OpcodeRuntimeMixin(OpcodeCallRuntimeMixin, OpcodeAccessRuntimeMixin):
             return
 
         group = UnpackGroup(
-            value=value, targets=[None] * count, starred_index=starred_index
+            value=value,
+            targets=[None] * count,
+            starred_index=starred_index,
+            parent=raw_value if isinstance(raw_value, UnpackSlot) else None,
         )
         self.unpack_groups.append(group)
         for index in reversed(range(count)):
@@ -510,6 +572,8 @@ class OpcodeRuntimeMixin(OpcodeCallRuntimeMixin, OpcodeAccessRuntimeMixin):
 
     def unary_op(self, op: ast.unaryop) -> None:
         value = coerce_expr(self.pop_or_none())
+        if isinstance(op, ast.Not):
+            value = unwrap_truth_test(value)
         self.stack.append(ast.UnaryOp(op=op, operand=value))
 
     def compare_op(self, symbol: str) -> None:
@@ -520,7 +584,23 @@ class OpcodeRuntimeMixin(OpcodeCallRuntimeMixin, OpcodeAccessRuntimeMixin):
             return
 
         right, left = self.pop_binary()
-        self.stack.append(ast.Compare(left=left, ops=[op_type()], comparators=[right]))
+        if isinstance(left, ast.Compare) and getattr(left, "_pyc2py_chain", None):
+            self.stack.append(
+                ast.Compare(
+                    left=left.left,
+                    ops=[*left.ops, op_type()],
+                    comparators=[*left.comparators, right],
+                )
+            )
+            return
+        compare = ast.Compare(left=left, ops=[op_type()], comparators=[right])
+        self.stack.append(self.join_compare_chain(compare))
+
+    def chained_compare_link(self, last_link_op: str | None) -> None:
+        comparison = unwrap_truth_test(coerce_expr(self.pop_or_none()))
+        self.pop_or_none()
+        setattr(comparison, "_pyc2py_chain", last_link_op or "open")
+        self.stack.append(comparison)
 
     def format_value(self, flags: int) -> None:
         format_spec = None
@@ -539,7 +619,9 @@ class OpcodeRuntimeMixin(OpcodeCallRuntimeMixin, OpcodeAccessRuntimeMixin):
 
     def format_simple(self) -> None:
         value = coerce_expr(self.pop_or_none())
-        self.stack.append(ast.JoinedStr(values=make_joined_string_parts(value)))
+        if not isinstance(value, ast.FormattedValue):
+            value = ast.FormattedValue(value=value, conversion=-1, format_spec=None)
+        self.stack.append(ast.JoinedStr(values=[value]))
 
     def format_with_spec(self) -> None:
         format_spec = make_format_spec(coerce_expr(self.pop_or_none()))
@@ -637,6 +719,8 @@ def make_class_store_statement(
         version,
         value.bases,
         tuple(type_alias_params(value.type_params) or ()),
+        value.keywords,
+        value.decorators,
     )
 
 
@@ -890,3 +974,19 @@ def type_param_constraint_expr(value: ast.expr) -> ast.expr | None:
     if isinstance(value, ast.Lambda):
         return value.body
     return value
+
+
+def make_dropped_unpack_target() -> ast.Name:
+    target = ast.Name(id="_", ctx=ast.Store())
+    setattr(target, "_pyc2py_dropped_store", True)
+    return target
+
+
+def name_dropped_unpack_targets(targets: list[ast.expr]) -> None:
+    following: str | None = None
+    for target in reversed(targets):
+        if not isinstance(target, ast.Name):
+            continue
+        if getattr(target, "_pyc2py_dropped_store", False) and following is not None:
+            target.id = following
+        following = target.id

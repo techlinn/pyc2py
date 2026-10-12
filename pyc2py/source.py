@@ -1,5 +1,6 @@
 import ast
 import io
+import keyword
 import re
 import token
 import tokenize
@@ -7,7 +8,7 @@ import warnings
 from collections.abc import Iterable
 from dataclasses import dataclass
 
-from pyc2py.astree import analyze_ast_shape
+from pyc2py.astree import LINE_BREAK_PREFIX, analyze_ast_shape
 from pyc2py.constants import MAX_AST_NODES, MAX_SOURCE_LINE_LENGTH
 from pyc2py.decompiler.engine import decompile_native_source
 from pyc2py.decompiler.opcodes.values import EMPTY_SLICE_STEP_NAME
@@ -24,6 +25,7 @@ class SourceValidation:
     compile_checks: tuple[str, ...] = ()
     warnings: tuple[str, ...] = ()
     error: str | None = None
+    code: object | None = None
 
     @property
     def checks(self) -> tuple[str, ...]:
@@ -75,7 +77,7 @@ def validate_source(source: str, filename: str = "<pyc2py>") -> SourceValidation
         helper_errors = validate_unresolved_helpers(parsed)
         if helper_errors:
             raise ValueError("; ".join(helper_errors))
-        _compiled, compile_warnings = compile_source_checked(source, filename)
+        compiled, compile_warnings = compile_source_checked(source, filename)
     except SyntaxError as error:
         return SourceValidation(
             compiled=False,
@@ -101,6 +103,7 @@ def validate_source(source: str, filename: str = "<pyc2py>") -> SourceValidation
         ast_shape_checks=ast_shape.checks,
         compile_checks=make_compile_checks(compile_warnings),
         warnings=(*formatting.warnings, *control_flow_warnings),
+        code=compiled,
     )
 
 
@@ -212,7 +215,8 @@ def validate_source_format(source: str) -> SourceFormatValidation:
     if source and not source.endswith("\n"):
         warnings.append("source does not end with a newline")
 
-    trailing_whitespace = count_trailing_whitespace_lines(source)
+    code_text, _held_strings = hold_multiline_strings(source)
+    trailing_whitespace = count_trailing_whitespace_lines(code_text)
     long_lines = count_long_lines(source, MAX_SOURCE_LINE_LENGTH)
     checks.extend(
         [
@@ -298,7 +302,6 @@ def try_native_decompile(
     )
     if problem is not None:
         warnings.append(f"native decompiler output did not compile: {problem}")
-        return None
 
     add_report_warnings(
         warnings,
@@ -331,6 +334,7 @@ def format_readable_source(
     prefer_single_quotes: bool = False,
     legacy_bytes_literals: bool = False,
 ) -> str:
+    source, held_strings = hold_multiline_strings(source)
     lines = separate_module_docstring(source.splitlines())
     lines = expand_initial_module_docstring_tabs(lines)
     prefer_single_quotes = prefer_single_quotes and not is_assignment_data_module(lines)
@@ -355,7 +359,76 @@ def format_readable_source(
         normalized = apply_legacy_source_formatters(normalized)
     if legacy_bytes_literals:
         normalized = format_legacy_bstr_assignments(normalized)
-    return normalized + "\n"
+    normalized = break_lines_at_marked_names(normalized)
+    return restore_multiline_strings(normalized + "\n", held_strings)
+
+
+KEYWORD_BEFORE_VALUE_RE = re.compile(r"(?<=[\s(])[A-Za-z_]\w*=$")
+OPENING_BRACKETS = frozenset("([{")
+CLOSING_BRACKETS = frozenset(")]}")
+
+
+def break_lines_at_marked_names(source: str) -> str:
+    if LINE_BREAK_PREFIX not in source:
+        return source
+    try:
+        tokens = list(tokenize.generate_tokens(io.StringIO(source).readline))
+    except (tokenize.TokenError, SyntaxError):
+        return source.replace(LINE_BREAK_PREFIX, "")
+
+    lines = source.splitlines()
+    depth = 0
+    breaks: list[tuple[int, int, bool]] = []
+    for item in tokens:
+        if item.type == token.OP:
+            depth += item.string in OPENING_BRACKETS
+            depth -= item.string in CLOSING_BRACKETS
+        elif item.type == token.NAME and item.string.startswith(LINE_BREAK_PREFIX):
+            breaks.append((item.start[0] - 1, item.start[1], depth > 0))
+    for row, column, in_brackets in reversed(breaks):
+        line = lines[row]
+        indent = line[: len(line) - len(line.lstrip())]
+        head = line[:column].rstrip()
+        tail = line[column + len(LINE_BREAK_PREFIX) :]
+        if not head:
+            lines[row] = indent + tail
+            continue
+        keyword_start = KEYWORD_BEFORE_VALUE_RE.search(head) if in_brackets else None
+        if keyword_start is not None:
+            head, tail = head[: keyword_start.start()].rstrip(), keyword_start[0] + tail
+        if not in_brackets:
+            head += " \\"
+        lines[row : row + 1] = [head, f"{indent}        {tail}"]
+    return "\n".join(lines)
+
+
+MULTILINE_STRING_HOLDER = '"""__pyc2py_multiline_string_{index}__"""'
+
+
+def hold_multiline_strings(source: str) -> tuple[str, list[str]]:
+    try:
+        tokens = list(tokenize.generate_tokens(io.StringIO(source).readline))
+    except (tokenize.TokenError, SyntaxError):
+        return source, []
+
+    lines = source.splitlines(keepends=True)
+    held: list[str] = []
+    for item in reversed(tokens):
+        if item.type != tokenize.STRING or item.start[0] == item.end[0]:
+            continue
+        first, last = item.start[0] - 1, item.end[0] - 1
+        holder = MULTILINE_STRING_HOLDER.format(index=len(held))
+        held.append(item.string)
+        lines[first : last + 1] = [
+            lines[first][: item.start[1]] + holder + lines[last][item.end[1] :]
+        ]
+    return "".join(lines), held
+
+
+def restore_multiline_strings(source: str, held: list[str]) -> str:
+    for index, text in enumerate(held):
+        source = source.replace(MULTILINE_STRING_HOLDER.format(index=index), text, 1)
+    return source
 
 
 def format_source_line(line: str) -> str | list[str]:
@@ -364,7 +437,6 @@ def format_source_line(line: str) -> str | list[str]:
     line = format_f_string_quote_style(line)
     line = format_nested_quote_f_string(line)
     line = format_repeated_string_constant(line)
-    line = format_parameter_separator_spacing(line)
     line = format_large_negative_integer_assignment(line)
     line = format_long_assignment_line(line)
     line = format_long_print_call_line(line)
@@ -400,8 +472,7 @@ def format_spaced_source_line(line: str) -> str:
     line = format_raw_f_string_backslashes(line)
     line = format_f_string_quote_style(line)
     line = format_nested_quote_f_string(line)
-    line = format_repeated_string_constant(line)
-    return format_parameter_separator_spacing(line)
+    return format_repeated_string_constant(line)
 
 
 def apply_legacy_source_formatters(source: str) -> str:
@@ -554,7 +625,7 @@ def format_legacy_constant_print_line(line: str) -> str:
     match = LEGACY_STRING_PRINT_RE.match(line)
     if match is None:
         return line
-    value = match.group("value").replace("\\", "\\\\").replace('"', '\\"')
+    value = match.group("value")
     return f'{match.group("indent")}print("{value}")'
 
 
@@ -574,7 +645,7 @@ def format_legacy_redirected_constant_print_line(line: str) -> str:
     match = LEGACY_REDIRECTED_STRING_PRINT_RE.match(line)
     if match is None:
         return line
-    value = match.group("value").replace("\\", "\\\\").replace('"', '\\"')
+    value = match.group("value")
     return f'{match.group("indent")}print >> {match.group("target")}, "{value}"'
 
 
@@ -642,7 +713,7 @@ def format_legacy_bare_double_quoted_print_line(line: str) -> str:
     match = LEGACY_STRING_PRINT_RE.match(line)
     if match is None:
         return line
-    value = match.group("value").replace("\\", "\\\\").replace('"', '\\"')
+    value = match.group("value")
     return f'{match.group("indent")}print "{value}"'
 
 
@@ -655,7 +726,7 @@ def format_legacy_bstr_assignment_line(line: str) -> str:
     match = LEGACY_BSTR_ASSIGNMENT_RE.match(line)
     if match is None:
         return line
-    value = match.group("value").replace("\\", "\\\\").replace('"', '\\"')
+    value = match.group("value")
     return f'{match.group("indent")}bstr = b"{value}"'
 
 
@@ -734,11 +805,42 @@ def format_yield_parentheses(line: str) -> str:
 
 
 def format_raw_f_string_backslashes(line: str) -> str:
+    spans = f_string_spans(line)
     return re.sub(
         r"(?<![A-Za-z])f'([^'\n\"]*\\\\[^'\n\"]*)'",
-        replace_raw_f_string_backslashes,
+        lambda match: (
+            replace_raw_f_string_backslashes(match)
+            if match.span() in spans
+            else match.group(0)
+        ),
         line,
     )
+
+
+def f_string_spans(line: str) -> set[tuple[int, int]]:
+    spans: set[tuple[int, int]] = set()
+    starts: list[int] = []
+    fstring_start = getattr(token, "FSTRING_START", None)
+    fstring_end = getattr(token, "FSTRING_END", None)
+    try:
+        for item in tokenize.generate_tokens(io.StringIO(line).readline):
+            if item.start[0] != 1 or item.end[0] != 1:
+                continue
+            if item.type == fstring_start:
+                starts.append(item.start[1])
+            elif item.type == fstring_end and starts:
+                start = starts.pop()
+                if not starts:
+                    spans.add((start, item.end[1]))
+            elif item.type == token.STRING and "f" in string_prefix(item.string):
+                spans.add((item.start[1], item.end[1]))
+    except (tokenize.TokenError, SyntaxError):
+        pass
+    return spans
+
+
+def string_prefix(literal: str) -> str:
+    return literal[: len(literal) - len(literal.lstrip("rRbBuUfF"))].lower()
 
 
 def replace_raw_f_string_backslashes(match: re.Match[str]) -> str:
@@ -746,13 +848,20 @@ def replace_raw_f_string_backslashes(match: re.Match[str]) -> str:
     if content.endswith("\\\\"):
         return match.group(0)
     raw_content = content.replace("\\\\", "\\")
+    if "\\" in content.replace("\\\\", ""):
+        return match.group(0)
     return f'rf"{raw_content}"'
 
 
 def format_f_string_quote_style(line: str) -> str:
+    spans = f_string_spans(line)
     return re.sub(
         r"(?<![A-Za-z])f'([^'\n\"]*)'",
-        lambda match: replace_f_string_quote_style(line, match),
+        lambda match: (
+            replace_f_string_quote_style(line, match)
+            if match.span() in spans
+            else match.group(0)
+        ),
         line,
     )
 
@@ -888,7 +997,10 @@ def format_power_operator_spacing(line: str) -> str:
         if previous_token is None or next_token is None:
             previous_token = current
             continue
-        if current.start[0] != current.end[0]:
+        if previous_token.end[0] != 1 or next_token.start[0] != 1:
+            previous_token = current
+            continue
+        if not ends_operand(previous_token):
             previous_token = current
             continue
         replacements.append((previous_token.end[1], next_token.start[1]))
@@ -898,6 +1010,20 @@ def format_power_operator_spacing(line: str) -> str:
     for start, end in reversed(replacements):
         compacted = compacted[:start] + "**" + compacted[end:]
     return compacted
+
+
+def ends_operand(item: tokenize.TokenInfo) -> bool:
+    if item.type == token.OP:
+        return item.string in {")", "]", "}"}
+    if item.type == token.NAME:
+        return not keyword.iskeyword(item.string) or item.string in {
+            "None",
+            "True",
+            "False",
+        }
+    return item.type in {token.NUMBER, token.STRING} or item.type == getattr(
+        token, "FSTRING_END", None
+    )
 
 
 def is_legacy_print_comprehension_line(line: str) -> bool:
@@ -975,7 +1101,10 @@ def format_modulo_addition_nodes(line: str, root: ast.AST) -> str:
         ):
             continue
         old_text = ast.unparse(node)
-        new_text = f"{ast.unparse(node.left)} + ({ast.unparse(node.right)})"
+        right_text = ast.unparse(node.right)
+        if not old_text.endswith(right_text):
+            continue
+        new_text = f"{old_text[: -len(right_text)]}({right_text})"
         if old_text in line:
             line = line.replace(old_text, new_text, 1)
     return line
@@ -1066,10 +1195,7 @@ def add_top_level_definition_spacing(lines: list[str]) -> list[str]:
         stripped = line.strip()
         if is_top_level_spacing_line(line) and not in_multiline_string:
             if not (
-                (
-                    is_top_level_definition_line(line)
-                    and previous_line_is_decorator(spaced)
-                )
+                previous_line_is_decorator(spaced)
                 or (
                     is_top_level_function_line(line)
                     and previous_content_is_initial_module_docstring(spaced)
@@ -2190,8 +2316,19 @@ def format_raw_f_string_token(prefix: str, body: str) -> str | None:
         return None
     if "\\\n" in content or content.endswith("\\\\"):
         return None
+    if "\\" in content.replace("\\\\", ""):
+        return None
     raw_content = content.replace("\\\\", "\\")
     return f'r{prefix}"{raw_content}"'
+
+
+def escape_codepoint(codepoint: int) -> str:
+    # control characters, lone surrogates and the invisible separators
+    if codepoint <= 0xFF:
+        return f"\\x{codepoint:02x}"
+    if codepoint <= 0xFFFF:
+        return f"\\u{codepoint:04x}"
+    return f"\\U{codepoint:08x}"
 
 
 def escape_single_quoted_string_value(value: str) -> str:
@@ -2208,8 +2345,8 @@ def escape_single_quoted_string_value(value: str) -> str:
             parts.append("\\r")
         elif character == "\t":
             parts.append("\\t")
-        elif codepoint < 32 or codepoint == 127:
-            parts.append(f"\\x{codepoint:02x}")
+        elif not character.isprintable():
+            parts.append(escape_codepoint(codepoint))
         else:
             parts.append(character)
     return "".join(parts)
@@ -2261,8 +2398,8 @@ def escape_string_value(value: str) -> str:
             parts.append("\\r")
         elif character == "\t":
             parts.append("\\t")
-        elif codepoint < 32 or codepoint == 127:
-            parts.append(f"\\x{codepoint:02x}")
+        elif not character.isprintable():
+            parts.append(escape_codepoint(codepoint))
         else:
             parts.append(character)
     return "".join(parts)
@@ -2301,27 +2438,6 @@ def format_single_assignment_target(indent: str, statement: ast.Assign) -> str |
             f"{format_sequence_items(statement.value)}"
         )
     return None
-
-
-def format_parameter_separator_spacing(line: str) -> str:
-    if ",**" not in line:
-        return line
-    stripped = line.lstrip()
-    if is_definition_header(stripped):
-        return line.replace(",**", ", **")
-
-    statement = parse_single_statement(stripped)
-    if statement is None or not contains_keyword_unpack_call(statement):
-        return line
-    return line.replace(",**", ", **")
-
-
-def contains_keyword_unpack_call(statement: ast.stmt) -> bool:
-    return any(
-        isinstance(node, ast.Call)
-        and any(keyword.arg is None for keyword in node.keywords)
-        for node in ast.walk(statement)
-    )
 
 
 def format_single_unpack_assignment(
@@ -2493,30 +2609,8 @@ def format_long_print_call_line(line: str) -> str:
     if value.keywords or len(value.args) != 1:
         return line
 
-    child_indent = indent + "    "
-    argument_lines = format_print_argument_lines(value.args[0], child_indent)
-    return "\n".join([f"{indent}print(", *argument_lines, f"{indent})"])
-
-
-def format_print_argument_lines(argument: ast.expr, indent: str) -> list[str]:
-    if isinstance(argument, ast.BinOp) and isinstance(argument.op, ast.Add):
-        operands = flatten_addition_operands(argument)
-        if len(operands) > 1:
-            lines = [f"{indent}{ast.unparse(operands[0])}"]
-            lines.extend(
-                f"{indent}+ {ast.unparse(operand)}" for operand in operands[1:]
-            )
-            return lines
-    return [f"{indent}{ast.unparse(argument)}"]
-
-
-def flatten_addition_operands(value: ast.expr) -> list[ast.expr]:
-    if isinstance(value, ast.BinOp) and isinstance(value.op, ast.Add):
-        return [
-            *flatten_addition_operands(value.left),
-            *flatten_addition_operands(value.right),
-        ]
-    return [value]
+    argument = ast.unparse(value.args[0])
+    return "\n".join([f"{indent}print(", f"{indent}    {argument}", f"{indent})"])
 
 
 def format_multiline_dict_assignment(

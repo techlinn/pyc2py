@@ -52,9 +52,19 @@ def make_special_constant(
         return make_legacy_long_constant(value)
     if isinstance(value, float) and math.isnan(value):
         return make_nan_constant(value, negative_nan)
+    if isinstance(value, complex) and is_negated_imaginary(value):
+        return ast.UnaryOp(op=ast.USub(), operand=ast.Constant(value=-value))
     if isinstance(value, int) and not isinstance(value, bool):
         return ast.Constant(value=int(value))
     return None
+
+
+def is_negated_imaginary(value: complex) -> bool:
+    return (
+        value.real == 0
+        and math.copysign(1.0, value.real) < 0
+        and math.copysign(1.0, value.imag) < 0
+    )
 
 
 def make_collection_constant(
@@ -148,7 +158,7 @@ def make_frozen_dict_constant(value: FrozenDictValue) -> ast.Call:
 
 
 def make_slice_constant(value: slice) -> ast.Call:
-    return ast.Call(
+    call = ast.Call(
         func=make_name("slice", ast.Load()),
         args=[
             make_constant(value.start),
@@ -157,6 +167,20 @@ def make_slice_constant(value: slice) -> ast.Call:
         ],
         keywords=[],
     )
+    setattr(call, "_pyc2py_slice_constant", True)
+    return call
+
+
+def written_slice(index: ast.expr | ast.Slice) -> ast.expr | ast.Slice:
+    if isinstance(index, ast.Tuple):
+        index.elts = [written_slice(item) for item in index.elts]
+        return index
+    if not isinstance(index, ast.Call) or not getattr(
+        index, "_pyc2py_slice_constant", False
+    ):
+        return index
+    lower, upper, step = (none_to_empty(bound) for bound in index.args)
+    return make_slice(lower, upper, step)
 
 
 def none_to_empty(value: ast.expr) -> ast.expr | None:
@@ -306,7 +330,7 @@ def make_subscript(
     slice_value: ast.expr | ast.Slice,
     ctx: ast.expr_context,
 ) -> ast.Subscript:
-    return ast.Subscript(value=value, slice=slice_value, ctx=ctx)
+    return ast.Subscript(value=value, slice=written_slice(slice_value), ctx=ctx)
 
 
 def make_binary_subscript(value: ast.expr, index: ast.expr) -> ast.Subscript:

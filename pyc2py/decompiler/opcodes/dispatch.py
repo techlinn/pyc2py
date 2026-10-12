@@ -2,6 +2,8 @@ import ast
 import math
 from typing import Any
 
+from pyc2py.astree import LINE_BREAK_ATTRIBUTE, make_assertion_error_name
+from pyc2py.bytecode.chained_compare import CHAINED_COMPARE_LINK
 from pyc2py.bytecode.instruction import Instruction
 from pyc2py.bytecode.opcode_table import normalized_opcode_name
 from pyc2py.decompiler.opcodes.flow import is_jump_op
@@ -79,6 +81,15 @@ def dispatch_stack_instruction(decompiler: Any, instruction: Instruction) -> boo
     return dispatch_end_for(decompiler, opname)
 
 
+def mark_default_line_breaks(decompiler: Any, instruction: Instruction) -> None:
+    defaults = decompiler.stack[-1]
+    line_breaks = decompiler.line_break_offsets.get(instruction.offset, ())
+    if not isinstance(defaults, ast.Tuple):
+        return
+    for value, line_break in zip(defaults.elts, line_breaks, strict=False):
+        setattr(value, LINE_BREAK_ATTRIBUTE, line_break)
+
+
 def dispatch_stack_value_instruction(
     decompiler: Any,
     instruction: Instruction,
@@ -95,6 +106,7 @@ def dispatch_stack_value_instruction(
                 ),
             )
         )
+        mark_default_line_breaks(decompiler, instruction)
         return True
     if opname == "LOAD_SMALL_INT":
         decompiler.stack.append(make_constant(int(instruction.argval or 0)))
@@ -166,9 +178,12 @@ def dispatch_name_load_instruction(
         return True
     if opname in LOAD_OPS:
         load_name(decompiler, instruction.argval)
+        line_breaks = decompiler.line_break_offsets.get(instruction.offset)
+        if line_breaks is not None:
+            setattr(decompiler.stack[-1], LINE_BREAK_ATTRIBUTE, line_breaks[0])
         return True
     if opname == "LOAD_ASSERTION_ERROR":
-        decompiler.stack.append(make_name("AssertionError", ast.Load()))
+        decompiler.stack.append(make_assertion_error_name())
         return True
     if opname == "LOAD_BUILD_CLASS":
         decompiler.stack.append(decompiler.build_class_marker())
@@ -259,6 +274,10 @@ def dispatch_operator_instruction(decompiler: Any, instruction: Instruction) -> 
         decompiler.compare_op(str(instruction.argrepr))
         return True
 
+    if opname == CHAINED_COMPARE_LINK:
+        decompiler.chained_compare_link(instruction.argval)
+        return True
+
     return dispatch_compare_arg_op(decompiler, opname, instruction.arg)
 
 
@@ -303,7 +322,18 @@ def load_global_name(decompiler: Any, instruction: Instruction) -> None:
     )
     if pushes_null:
         decompiler.stack.append(make_name("NULL", ast.Load()))
+    if instruction.argval == "AssertionError" and not has_assertion_error_op(
+        decompiler.version
+    ):
+        decompiler.stack.append(make_assertion_error_name())
+        return
     load_name(decompiler, instruction.argval)
+
+
+def has_assertion_error_op(version: tuple[int, ...] | None) -> bool:
+    # before 3.9 an assert loads the global like any other code would, so the
+    # two cannot be told apart there
+    return version is not None and version >= (3, 9)
 
 
 def load_name(decompiler: Any, value: object) -> None:

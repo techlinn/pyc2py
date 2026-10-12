@@ -173,7 +173,7 @@ def make_legacy_code(
         stacksize=stacksize,
         flags=flags,
         code=as_bytes(fields["code"]),
-        consts=tuple(fields["consts"]),
+        consts=as_tuple(fields["consts"]),
         names=as_text_tuple(fields["names"]),
         varnames=as_text_tuple(fields["varnames"]),
         filename=as_text(fields["filename"]),
@@ -197,17 +197,25 @@ def as_bytes(value: Any) -> bytes:
     if isinstance(value, str):
         return value.encode("latin-1", errors="surrogateescape")
 
-    return bytes(value)
+    raise ValueError(f"code object field is not bytes: {type(value).__name__}")
 
 
 def as_text(value: Any) -> str:
     if isinstance(value, bytes):
         return value.decode("latin-1", errors="surrogateescape")
-    return str(value)
+    if isinstance(value, str):
+        return value
+    raise ValueError(f"code object field is not text: {type(value).__name__}")
+
+
+def as_tuple(values: Any) -> tuple[Any, ...]:
+    if isinstance(values, (tuple, list)):
+        return tuple(values)
+    raise ValueError(f"code object field is not a tuple: {type(values).__name__}")
 
 
 def as_text_tuple(values: Any) -> tuple[str, ...]:
-    return tuple(as_text(value) for value in values)
+    return tuple(as_text(value) for value in as_tuple(values))
 
 
 def split_localsplus(
@@ -217,7 +225,7 @@ def split_localsplus(
     cell_names: list[Any] = []
     free_names: list[Any] = []
 
-    for name, kind in zip(tuple(names), bytes(kinds), strict=True):
+    for name, kind in zip(as_tuple(names), as_bytes(kinds), strict=True):
         if kind & 0x20:
             local_names.append(name)
         if kind & 0x40:

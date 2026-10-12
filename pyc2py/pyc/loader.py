@@ -12,6 +12,10 @@ from pyc2py.pyc.marshal_reader import load_marshal_code
 from pyc2py.types import PycHeader, PycModule
 
 
+class PycLoadError(ValueError):
+    pass
+
+
 def load_pyc(path: Path) -> PycModule:
     if not path.exists():
         raise FileNotFoundError(path)
@@ -36,13 +40,9 @@ def load_native_pyc_with_error(path: Path) -> PycModule | None:
 def load_legacy_pyc_with_error(path: Path) -> PycModule:
     try:
         return load_legacy_pyc(path)
-    except (EOFError, UnicodeDecodeError, ValueError, struct.error):
-        return make_failed_module(path)
-
-
-def make_failed_module(path: Path) -> PycModule:
-    header = read_header(path)
-    return PycModule(header=header, code=None)
+    except (EOFError, UnicodeDecodeError, ValueError, struct.error) as error:
+        reason = str(error) or type(error).__name__
+        raise PycLoadError(f"cannot read pyc file {path}: {reason}") from error
 
 
 def load_native_pyc(path: Path) -> PycModule | None:

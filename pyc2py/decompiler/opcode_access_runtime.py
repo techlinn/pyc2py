@@ -21,8 +21,13 @@ from pyc2py.decompiler.opcodes.values import (
     make_subscript_delete,
     make_subscript_store,
 )
-from pyc2py.decompiler.recover import append_annotation_statement
+from pyc2py.decompiler.recover import (
+    annotation_from_text,
+    append_annotation_statement,
+    stores_annotation_text,
+)
 from pyc2py.decompiler.runtime import (
+    FUNCTION_VALUE_MARK,
     FunctionValue,
     UnpackSlot,
     coerce_expr,
@@ -371,7 +376,7 @@ class OpcodeAccessRuntimeMixin(DecompilerContext):
             raw_index if isinstance(raw_index, ast.Slice) else coerce_expr(raw_index)
         )
         target_value = coerce_expr(self.pop_or_none())
-        raw_value = self.pop_or_none()
+        raw_value = self.release_copied_store(self.pop_or_none())
 
         if isinstance(raw_value, UnpackSlot):
             target = make_subscript(target_value, index, ast.Store())
@@ -387,20 +392,42 @@ class OpcodeAccessRuntimeMixin(DecompilerContext):
             return
         self.append_store_statement(make_subscript_store(target_value, index, value))
 
+    def keep_copied_store(self, name: str, value: Any) -> bool:
+        if not self.stack or self.stack[-1] is not value:
+            return False
+        if not isinstance(value, ast.expr):
+            return False
+        expression = ast.NamedExpr(target=make_name(name, ast.Store()), value=value)
+        setattr(expression, "_pyc2py_copied_store", True)
+        self.stack[-1] = expression
+        return True
+
+    def release_copied_store(self, value: Any) -> Any:
+        if not getattr(value, "_pyc2py_copied_store", False):
+            return value
+        self.statements.append(ast.Assign(targets=[value.target], value=value.value))
+        if self.stack and self.stack[-1] is value:
+            self.stack[-1] = value.value
+        return value.value
+
     def append_store_statement(self, statement: ast.stmt) -> None:
         if self.pending_simultaneous_store_count > 0:
             setattr(statement, "_pyc2py_store_group", self.simultaneous_store_group)
+            if self.simultaneous_store_reversed:
+                setattr(statement, "_pyc2py_store_reversed", True)
             self.pending_simultaneous_store_count -= 1
         self.statements.append(statement)
 
     def expression_from_stack_value(self, value: Any) -> ast.expr:
         if isinstance(value, FunctionValue):
-            return make_lambda_expr(
+            node = make_lambda_expr(
                 value.code,
                 self.version,
                 value.defaults,
                 value.kw_defaults,
             )
+            setattr(node, FUNCTION_VALUE_MARK, value)
+            return node
         return coerce_expr(value)
 
     def try_store_annotation(
@@ -413,6 +440,8 @@ class OpcodeAccessRuntimeMixin(DecompilerContext):
             return False
         if not isinstance(index, ast.Constant) or not isinstance(index.value, str):
             return False
+        if stores_annotation_text(self.code):
+            value = annotation_from_text(value)
         return append_annotation_statement(self.statements, index.value, value)
 
     def store_slice(self) -> None:
@@ -421,7 +450,7 @@ class OpcodeAccessRuntimeMixin(DecompilerContext):
         target_value = coerce_expr(self.pop_or_none())
         value = coerce_expr(self.pop_or_none())
 
-        self.statements.append(
+        self.append_store_statement(
             make_subscript_store(target_value, make_slice(start, stop), value)
         )
 
@@ -433,7 +462,7 @@ class OpcodeAccessRuntimeMixin(DecompilerContext):
 
     def store_attr(self, name: str) -> None:
         target_value = coerce_expr(self.pop_or_none())
-        raw_value = self.pop_or_none()
+        raw_value = self.release_copied_store(self.pop_or_none())
 
         if isinstance(raw_value, UnpackSlot):
             target = ast.Attribute(
@@ -444,8 +473,8 @@ class OpcodeAccessRuntimeMixin(DecompilerContext):
             self.store_unpack_target(raw_value, target)
             return
 
-        value = coerce_expr(raw_value)
-        self.statements.append(
+        value = self.expression_from_stack_value(raw_value)
+        self.append_store_statement(
             make_attr_store(safe_identifier(name), target_value, value)
         )
 
@@ -491,7 +520,9 @@ class OpcodeAccessRuntimeMixin(DecompilerContext):
         self.statements.append(make_raise(values))
 
     def reraise(self) -> None:
-        self.statements.append(make_raise([]))
+        statement = make_raise([])
+        setattr(statement, "_pyc2py_synthetic_raise", True)
+        self.statements.append(statement)
 
 
 LOAD_SPECIAL_METHOD_NAMES = (

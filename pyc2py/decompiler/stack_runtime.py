@@ -2,7 +2,6 @@ import ast
 from typing import Any
 
 from pyc2py.decompiler.context import DecompilerContext
-from pyc2py.decompiler.runtime import coerce_expr
 
 
 class StackRuntimeMixin(DecompilerContext):
@@ -61,12 +60,15 @@ class StackRuntimeMixin(DecompilerContext):
         self.stack.rotate_top(count)
 
     def pop_binary(self) -> tuple[ast.expr, ast.expr]:
-        right = coerce_expr(self.pop_or_none())
-        left = coerce_expr(self.pop_or_none())
+        right = self.expression_from_stack_value(self.pop_or_none())
+        left = self.expression_from_stack_value(self.pop_or_none())
         return right, left
 
     def pop_many(self, count: int) -> list[ast.expr]:
-        return [coerce_expr(value) for value in self.pop_many_raw(count)]
+        return [
+            self.expression_from_stack_value(value)
+            for value in self.pop_many_raw(count)
+        ]
 
     def pop_many_raw(self, count: int) -> list[Any]:
         if count < 0:

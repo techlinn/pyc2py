@@ -68,6 +68,7 @@ BINARY_OPS = (
     "BINARY_SUBTRACT",
     "BINARY_TRUE_DIVIDE",
     "BINARY_XOR",
+    "CHAINED_COMPARE_LINK",
     "COMPARE_OP",
     "CONTAINS_OP",
     "INPLACE_ADD",
@@ -132,6 +133,7 @@ FIXED_STACK_EFFECTS: dict[str, BytecodeStackEffect] = {
     "GET_YIELD_FROM_ITER": BytecodeStackEffect(pops=1, pushes=1),
     "EXEC_STMT": BytecodeStackEffect(pops=3, pushes=0),
     "IMPORT_FROM": BytecodeStackEffect(pops=0, pushes=1),
+    "IMPORT_NAME": BytecodeStackEffect(pops=2, pushes=1),
     "IMPORT_STAR": BytecodeStackEffect(pops=1, pushes=0),
     "INTERPRETER_EXIT": BytecodeStackEffect(pops=1, pushes=0),
     "JUMP_ABSOLUTE": NO_NET_EFFECT,
@@ -153,6 +155,7 @@ FIXED_STACK_EFFECTS: dict[str, BytecodeStackEffect] = {
     "LOAD_FROM_DICT_OR_DEREF": BytecodeStackEffect(pops=1, pushes=1),
     "LOAD_FROM_DICT_OR_GLOBALS": BytecodeStackEffect(pops=1, pushes=1),
     "LOAD_LOCALS": BytecodeStackEffect(pops=0, pushes=1),
+    "LOAD_METHOD": BytecodeStackEffect(pops=1, pushes=2),
     "LOAD_SPECIAL": BytecodeStackEffect(pops=1, pushes=2),
     "LOAD_SUPER_ATTR": BytecodeStackEffect(pops=3, pushes=1),
     "MATCH_KEYS": BytecodeStackEffect(pops=0, pushes=1),
@@ -300,8 +303,22 @@ def versioned_stack_effect(
     if version is None:
         return None
 
-    if opname == "END_FOR" and version >= (3, 14):
+    if opname == "END_FOR" and version >= (3, 13):
         return BytecodeStackEffect(pops=1, pushes=0)
+
+    # since 3.11 RERAISE only pops the exception, the saved lasti stays below
+    if opname == "RERAISE" and version >= (3, 11):
+        return BytecodeStackEffect(pops=1, pushes=0)
+
+    # since 3.13 the generator object is left on the stack for the POP_TOP
+    if opname == "RETURN_GENERATOR" and version >= (3, 13):
+        return BytecodeStackEffect(pops=0, pushes=1)
+
+    # IMPORT_NAME took the from-list alone until 2.5 added the level operand
+    if opname == "IMPORT_NAME" and version < (2, 0):
+        return BytecodeStackEffect(pops=0, pushes=1)
+    if opname == "IMPORT_NAME" and version < (2, 5):
+        return BytecodeStackEffect(pops=1, pushes=1)
 
     return None
 

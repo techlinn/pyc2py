@@ -1,7 +1,9 @@
 import ast
+import dataclasses
 from typing import Any
 
 from pyc2py.astree import is_assertion_error_expr as is_assertion_error_call_target
+from pyc2py.astree import spread_default_lines
 from pyc2py.bytecode.decoder import decode_instructions
 from pyc2py.bytecode.instruction import Instruction
 from pyc2py.bytecode.opcode_table import normalized_opcode_name
@@ -12,13 +14,18 @@ from pyc2py.decompiler.opcodes.imports_calls import (
     keyword_names_from_value,
     make_call_argument_plan,
     make_import_star_statement,
+    make_starred_keywords,
 )
 from pyc2py.decompiler.opcodes.imports_calls import (
     split_call_arguments as split_call_argument_values,
 )
 from pyc2py.decompiler.opcodes.stack_names import is_null_sentinel
 from pyc2py.decompiler.opcodes.values import is_code_constant
-from pyc2py.decompiler.recover import make_exec_call
+from pyc2py.decompiler.recover import (
+    annotation_from_text,
+    make_exec_call,
+    stores_annotation_text,
+)
 from pyc2py.decompiler.runtime import (
     BuildClassValue,
     ClassValue,
@@ -29,6 +36,7 @@ from pyc2py.decompiler.runtime import (
     make_class_value,
     make_comprehension_expr,
     make_lambda_expr,
+    make_unpacked_class_value,
     unwrap_lazy_expr,
 )
 from pyc2py.decompiler.runtime import (
@@ -48,6 +56,8 @@ class OpcodeCallRuntimeMixin(DecompilerContext):
             has_star_kwargs,
         ) = self.pop_call_arguments(instruction)
         function, self_argument = self.pop_call_target(instruction)
+        if self.try_call_unpacked_build_class(function, raw_arguments):
+            return
         (
             handled,
             function,
@@ -59,6 +69,7 @@ class OpcodeCallRuntimeMixin(DecompilerContext):
             raw_arguments,
         )
         if handled:
+            self.kw_names = ()
             return
 
         positional, keywords = split_call_argument_values(
@@ -83,10 +94,42 @@ class OpcodeCallRuntimeMixin(DecompilerContext):
             function = coerce_expr(function)
         if is_null_sentinel(function):
             function = coerce_expr(self.pop_or_none())
-        elif self.stack and is_null_sentinel(coerce_expr(self.stack[-1])):
+        elif (
+            call_opcode_name(instruction.opname, self.version) == "CALL_FUNCTION_EX"
+            and self.stack
+            and is_null_sentinel(coerce_expr(self.stack[-1]))
+        ):
             self.pop_or_none()
 
         self.stack.append(ast.Call(func=function, args=positional, keywords=keywords))
+
+    def try_call_unpacked_build_class(
+        self,
+        function: Any,
+        raw_arguments: list[Any],
+    ) -> bool:
+        if not raw_arguments or not self.stack:
+            return False
+        below = self.stack[-1]
+        null_on_top = is_null_sentinel(function) and isinstance(below, BuildClassValue)
+        null_below = isinstance(function, BuildClassValue) and is_null_sentinel(below)
+        if not null_on_top and not null_below:
+            return False
+
+        arguments = self.expression_from_stack_value(raw_arguments[0])
+        keywords = [
+            keyword
+            for value in raw_arguments[1:]
+            for keyword in make_starred_keywords(
+                self.expression_from_stack_value(value)
+            )
+        ]
+        class_value = make_unpacked_class_value(arguments, keywords)
+        if class_value is None:
+            return False
+        self.pop_or_none()
+        self.stack.append(class_value)
+        return True
 
     def prepare_call_target(
         self,
@@ -122,6 +165,12 @@ class OpcodeCallRuntimeMixin(DecompilerContext):
         self_argument: Any | None,
         raw_arguments: list[Any],
     ) -> tuple[bool, Any, Any | None, list[Any]]:
+        if (
+            isinstance(function, FunctionValue)
+            and not raw_arguments
+            and getattr(function.code, "co_name", "") == "<lambda>"
+        ):
+            return False, function, self_argument, raw_arguments
         if isinstance(function, FunctionValue) and not raw_arguments:
             if self.try_call_stacked_function_decorator(function):
                 return True, function, self_argument, raw_arguments
@@ -132,7 +181,9 @@ class OpcodeCallRuntimeMixin(DecompilerContext):
             self.stack.append(function)
             return True, function, self_argument, raw_arguments
         if isinstance(function, BuildClassValue):
-            self.stack.append(make_class_value(raw_arguments, self.version))
+            self.stack.append(
+                make_class_value(raw_arguments, self.version, self.kw_names)
+            )
             return True, function, self_argument, raw_arguments
         if self.try_call_function_decorator(function, raw_arguments):
             return True, function, self_argument, raw_arguments
@@ -146,6 +197,17 @@ class OpcodeCallRuntimeMixin(DecompilerContext):
     ) -> bool:
         if raw_arguments:
             return False
+        if isinstance(self_argument, ClassValue):
+            decorator = self.expression_from_stack_value(function)
+            if not is_valid_function_decorator(decorator):
+                return False
+            self.stack.append(
+                dataclasses.replace(
+                    self_argument,
+                    decorators=(decorator, *self_argument.decorators),
+                )
+            )
+            return True
         if not isinstance(self_argument, FunctionValue):
             return False
         if getattr(self_argument.code, "co_name", "") == "<lambda>":
@@ -302,9 +364,17 @@ class OpcodeCallRuntimeMixin(DecompilerContext):
         self, instruction: Instruction
     ) -> tuple[list[Any], int, bool, bool]:
         arg = int(instruction.arg or 0)
-        plan = make_call_argument_plan(
-            call_opcode_name(instruction.opname, self.version), arg, self.version
-        )
+        opname = call_opcode_name(instruction.opname, self.version)
+        if (
+            opname == "CALL_FUNCTION_EX"
+            and self.version is not None
+            and self.version >= (3, 14)
+        ):
+            arg = 1
+            if self.stack and is_null_sentinel(coerce_expr(self.stack[-1])):
+                self.pop_or_none()
+                arg = 0
+        plan = make_call_argument_plan(opname, arg, self.version)
         if plan.keyword_names_on_stack:
             self.set_kw_names_from_stack()
         return (
@@ -509,12 +579,25 @@ class OpcodeCallRuntimeMixin(DecompilerContext):
             return
 
         defaults, kw_defaults, annotations = self.pop_function_defaults(flags)
-        self.stack.append(
+        self.push_function_value(
             FunctionValue(
                 code=value.value,
                 defaults=tuple(defaults),
                 kw_defaults=kw_defaults,
                 annotations=annotations,
+            )
+        )
+
+    def push_function_value(self, function: FunctionValue) -> None:
+        if getattr(function.code, "co_name", "") != "<lambda>":
+            self.stack.append(function)
+            return
+        self.stack.append(
+            make_lambda_expr(
+                function.code,
+                self.version,
+                function.defaults,
+                function.kw_defaults,
             )
         )
 
@@ -577,6 +660,7 @@ class OpcodeCallRuntimeMixin(DecompilerContext):
         defaults = self.expression_from_stack_value(value)
         if not isinstance(defaults, ast.Tuple):
             return []
+        spread_default_lines(value, defaults.elts)
         return list(defaults.elts)
 
     def pop_modern_keyword_defaults(self) -> dict[str, ast.expr] | None:
@@ -600,11 +684,14 @@ class OpcodeCallRuntimeMixin(DecompilerContext):
             return self.function_annotations_from_code(value.code)
 
         annotations = self.expression_from_stack_value(value)
+        result: dict[str, ast.expr] | None = None
         if isinstance(annotations, ast.Dict):
-            return annotation_dict_from_ast_dict(annotations)
+            result = annotation_dict_from_ast_dict(annotations)
         if isinstance(annotations, ast.Tuple):
-            return annotation_dict_from_ast_tuple(annotations)
-        return None
+            result = annotation_dict_from_ast_tuple(annotations)
+        if result is None or not stores_annotation_text(self.code):
+            return result
+        return {name: annotation_from_text(item) for name, item in result.items()}
 
     def function_annotations_from_code(self, code: Any) -> dict[str, ast.expr] | None:
         return function_annotations_from_code(code, self.version)
@@ -612,6 +699,9 @@ class OpcodeCallRuntimeMixin(DecompilerContext):
     def set_function_attribute(self, flag: int) -> None:
         function = self.pop_or_none()
         value = self.pop_or_none()
+        if isinstance(function, ast.Lambda):
+            self.set_lambda_attribute(function, flag, value)
+            return
         if not isinstance(function, FunctionValue):
             self.warnings.append(
                 f"SET_FUNCTION_ATTRIBUTE without function for flag {flag}"
@@ -667,10 +757,17 @@ class OpcodeCallRuntimeMixin(DecompilerContext):
         if flag == 0x10:
             self.set_function_annotate_attribute(function, value)
             return
-        if flag == 0x08:
-            self.warnings.append(
-                f"SET_FUNCTION_ATTRIBUTE flag {flag:#x} is not rendered in source"
-            )
+        self.stack.append(function)
+
+    def set_lambda_attribute(self, function: ast.Lambda, flag: int, value: Any) -> None:
+        # python 3.13 attaches the defaults after the lambda was made
+        if flag == 0x01:
+            function.args.defaults = self.positional_defaults_from_value(value)
+        if flag == 0x02:
+            kw_defaults = self.keyword_defaults_from_value(value) or {}
+            function.args.kw_defaults = [
+                kw_defaults.get(argument.arg) for argument in function.args.kwonlyargs
+            ]
         self.stack.append(function)
 
     def set_function_annotate_attribute(
@@ -719,7 +816,7 @@ class OpcodeCallRuntimeMixin(DecompilerContext):
             return
 
         self.discard_closure_tuple()
-        self.stack.append(FunctionValue(code=value.value))
+        self.push_function_value(FunctionValue(code=value.value))
 
     def discard_closure_tuple(self) -> None:
         if not self.stack:
@@ -835,7 +932,7 @@ def annotation_name(value: ast.expr) -> str | None:
 
 
 def is_valid_function_decorator(value: ast.expr) -> bool:
-    return isinstance(value, (ast.Name, ast.Attribute, ast.Call))
+    return not isinstance(value, ast.Constant) and not is_null_sentinel(value)
 
 
 def intrinsic_name(instruction: Instruction) -> str:

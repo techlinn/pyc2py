@@ -41,7 +41,8 @@ def scan_wordcode(
             extended_arg = 0
         if consumes_next_wordcode(opname, version) and offset + 3 < len(code):
             next_offset += 2
-        result.append(DecodedOpcode(offset, opcode, opname, arg, next_offset))
+        if opname != "CACHE":
+            result.append(DecodedOpcode(offset, opcode, opname, arg, next_offset))
         offset = next_offset
 
     return result

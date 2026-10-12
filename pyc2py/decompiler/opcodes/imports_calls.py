@@ -48,11 +48,13 @@ def make_import_from_statement(
         return ast.Import(names=[ast.alias(name=module_name, asname=store_name)])
 
     asname = None if store_name == imported_name else store_name
-    return ast.ImportFrom(
+    statement = ast.ImportFrom(
         module=module_name,
         names=[ast.alias(name=imported_name, asname=asname)],
         level=get_import_level(value.module.level),
     )
+    setattr(statement, "_pyc2py_import_source", value.module)
+    return statement
 
 
 def is_dotted_import_alias(store_name: str, value: ImportedAttributeValue) -> bool:
