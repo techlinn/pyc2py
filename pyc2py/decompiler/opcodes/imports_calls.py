@@ -1,7 +1,7 @@
 import ast
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import TypeGuard, cast
 
 from pyc2py.decompiler.opcodes.stack_names import is_null_sentinel
 
@@ -9,8 +9,8 @@ from pyc2py.decompiler.opcodes.stack_names import is_null_sentinel
 @dataclass(frozen=True, slots=True)
 class ImportValue:
     name: str
-    level: Any
-    fromlist: Any
+    level: ast.Constant | None
+    fromlist: ast.Constant | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -28,7 +28,7 @@ class CallArgumentPlan:
     keyword_names_on_stack: bool = False
 
 
-ExpressionFactory = Callable[[Any], ast.expr]
+ExpressionFactory = Callable[[object], ast.expr]
 
 
 def make_import_statement(store_name: str, value: ImportValue) -> ast.stmt:
@@ -65,8 +65,8 @@ def is_dotted_import_alias(store_name: str, value: ImportedAttributeValue) -> bo
     return value.module.name.endswith(f".{value.name}") and store_name != value.name
 
 
-def is_none_fromlist(value: Any) -> bool:
-    return value is None or (isinstance(value, ast.Constant) and value.value is None)
+def is_none_fromlist(value: ast.Constant | None) -> bool:
+    return value is None or value.value is None
 
 
 def make_import_star_statement(value: ImportValue) -> ast.ImportFrom:
@@ -77,7 +77,7 @@ def make_import_star_statement(value: ImportValue) -> ast.ImportFrom:
     )
 
 
-def get_import_level(value: Any) -> int:
+def get_import_level(value: ast.Constant | None) -> int:
     if isinstance(value, ast.Constant) and isinstance(value.value, int):
         return max(0, value.value)
     return 0
@@ -130,8 +130,6 @@ def make_keywords(
 def keyword_name_from_expr(value: ast.expr) -> str | None:
     if isinstance(value, ast.Constant) and isinstance(value.value, str):
         return value.value
-    if isinstance(value, ast.Str):
-        return value.s if isinstance(value.s, str) else None
     return None
 
 
@@ -189,7 +187,7 @@ def make_call_argument_plan(
 
 
 def split_call_arguments(
-    raw_arguments: list[Any],
+    raw_arguments: list[object],
     keyword_names: tuple[str, ...],
     legacy_keyword_count: int,
     has_star_args: bool,
@@ -213,7 +211,7 @@ def split_call_arguments(
 
 
 def split_legacy_call_arguments(
-    raw_arguments: list[Any],
+    raw_arguments: list[object],
     keyword_count: int,
     has_star_args: bool,
     has_star_kwargs: bool,
@@ -253,7 +251,7 @@ def make_call_star_args(expression: ast.expr) -> list[ast.expr]:
 
 
 def make_legacy_keywords(
-    keyword_items: list[Any],
+    keyword_items: list[object],
     expression_from_value: ExpressionFactory,
 ) -> list[ast.keyword]:
     keywords: list[ast.keyword] = []
@@ -305,8 +303,15 @@ def make_unpacked_dict_keywords(expression: ast.Dict) -> list[ast.keyword] | Non
     return keywords
 
 
-def keyword_names_from_value(value: Any) -> tuple[str, ...] | None:
-    if isinstance(value, tuple) and all(isinstance(item, str) for item in value):
+def is_string_tuple(value: object) -> TypeGuard[tuple[str, ...]]:
+    if not isinstance(value, tuple):
+        return False
+    items = cast("tuple[object, ...]", value)
+    return all(isinstance(item, str) for item in items)
+
+
+def keyword_names_from_value(value: object) -> tuple[str, ...] | None:
+    if is_string_tuple(value):
         return value
 
     if isinstance(value, ast.Tuple):
