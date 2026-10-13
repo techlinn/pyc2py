@@ -1,9 +1,13 @@
 import ast
+import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TypeGuard, cast
 
+from pyc2py.astree import LAZY_IMPORT_MARK
 from pyc2py.decompiler.opcodes.stack_names import is_null_sentinel
+
+SUPPORTS_LAZY_IMPORT_FIELD = sys.version_info >= (3, 15)
 
 
 @dataclass(frozen=True, slots=True)
@@ -11,6 +15,7 @@ class ImportValue:
     name: str
     level: object
     fromlist: object
+    lazy: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,11 +36,22 @@ class CallArgumentPlan:
 ExpressionFactory = Callable[[object], ast.expr]
 
 
+def mark_lazy_import(statement: ast.stmt, lazy: bool) -> ast.stmt:
+    if not lazy:
+        return statement
+    setattr(statement, LAZY_IMPORT_MARK, True)
+    if SUPPORTS_LAZY_IMPORT_FIELD:
+        setattr(statement, "is_lazy", 1)
+    return statement
+
+
 def make_import_statement(store_name: str, value: ImportValue) -> ast.stmt:
     module_name = value.name
     asname = None if store_name == module_name.split(".")[0] else store_name
 
-    return ast.Import(names=[ast.alias(name=module_name, asname=asname)])
+    return mark_lazy_import(
+        ast.Import(names=[ast.alias(name=module_name, asname=asname)]), value.lazy
+    )
 
 
 def make_import_from_statement(
@@ -45,7 +61,10 @@ def make_import_from_statement(
     imported_name = value.name
 
     if is_dotted_import_alias(store_name, value):
-        return ast.Import(names=[ast.alias(name=module_name, asname=store_name)])
+        return mark_lazy_import(
+            ast.Import(names=[ast.alias(name=module_name, asname=store_name)]),
+            value.module.lazy,
+        )
 
     asname = None if store_name == imported_name else store_name
     statement = ast.ImportFrom(
@@ -54,7 +73,7 @@ def make_import_from_statement(
         level=get_import_level(value.module.level),
     )
     setattr(statement, "_pyc2py_import_source", value.module)
-    return statement
+    return mark_lazy_import(statement, value.module.lazy)
 
 
 def is_dotted_import_alias(store_name: str, value: ImportedAttributeValue) -> bool:

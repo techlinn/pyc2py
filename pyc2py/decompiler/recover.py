@@ -190,11 +190,17 @@ def make_generator_exp(
 
 
 def make_dict_comp(
-    key: ast.expr,
-    value: ast.expr,
+    key: ast.expr | None,
+    value: ast.expr | None,
     generators: list[ast.comprehension],
 ) -> ast.DictComp:
-    return ast.DictComp(key=key, value=value, generators=generators)
+    # key and value are optional AST fields since Python 3.15 (PEP 798
+    # dict unpacking); typeshed for older versions still requires them
+    return ast.DictComp(
+        key=key,  # type: ignore[arg-type]  # pyright: ignore[reportArgumentType]
+        value=value,  # type: ignore[arg-type]  # pyright: ignore[reportArgumentType]
+        generators=generators,
+    )
 
 
 def with_code_docstring(code: Any, body: list[ast.stmt]) -> list[ast.stmt]:

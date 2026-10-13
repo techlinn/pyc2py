@@ -844,6 +844,12 @@ class ControlComprehensionRecoveryMixin(DecompilerContext, ABC):
             min_remaining=3,
         )
         if header is None:
+            header = self.read_inlined_comprehension_header_before(
+                instructions,
+                cursor,
+                end_index,
+            )
+        if header is None:
             return None
 
         for_iter_index = header.cursor + 3
@@ -980,6 +986,40 @@ class ControlComprehensionRecoveryMixin(DecompilerContext, ABC):
             cursor=cursor,
         )
 
+    def read_inlined_comprehension_header_before(
+        self,
+        instructions: list[Instruction],
+        get_iter_index: int,
+        end_index: int,
+    ) -> InlinedComprehensionHeader | None:
+        if get_iter_index < 4 or get_iter_index > end_index:
+            return None
+        second_swap = instructions[get_iter_index - 1]
+        build_instruction = instructions[get_iter_index - 2]
+        first_swap = instructions[get_iter_index - 3]
+        if second_swap.opname != "SWAP" or second_swap.arg != 2:
+            return None
+        if build_instruction.opname not in COMPREHENSION_BUILD_OPS:
+            return None
+        save_count = 0
+        while (
+            get_iter_index - 4 - save_count >= 0
+            and instructions[get_iter_index - 4 - save_count].opname
+            == "LOAD_FAST_AND_CLEAR"
+        ):
+            save_count += 1
+        if save_count == 0:
+            return None
+        if not is_valid_inlined_first_swap(first_swap, save_count):
+            return None
+        return InlinedComprehensionHeader(
+            save_instructions=tuple(
+                instructions[get_iter_index - 3 - save_count : get_iter_index - 3]
+            ),
+            build_instruction=build_instruction,
+            cursor=get_iter_index - 3,
+        )
+
     def is_async_inlined_next_sequence(
         self,
         instructions: list[Instruction],
@@ -1055,10 +1095,16 @@ class ControlComprehensionRecoveryMixin(DecompilerContext, ABC):
     ) -> bool:
         return (
             (build_opname == "BUILD_LIST" and update_opname == "LIST_APPEND")
+            or (build_opname == "BUILD_LIST" and update_opname == "LIST_EXTEND")
             or (build_opname == "BUILD_SET" and update_opname == "SET_ADD")
+            or (build_opname == "BUILD_SET" and update_opname == "SET_UPDATE")
             or (
                 build_opname in {"BUILD_DICT", "BUILD_MAP"}
                 and update_opname == "MAP_ADD"
+            )
+            or (
+                build_opname in {"BUILD_DICT", "BUILD_MAP"}
+                and update_opname == "DICT_UPDATE"
             )
             or (build_opname == "RETURN_GENERATOR" and update_opname == "YIELD_VALUE")
         )
@@ -1079,6 +1125,17 @@ class ControlComprehensionRecoveryMixin(DecompilerContext, ABC):
             if build_opname == "BUILD_LIST":
                 return make_list_comp(elt, generators)
             return make_set_comp(elt, generators)
+
+        if update_opname in {"LIST_EXTEND", "SET_UPDATE"}:
+            if not expressions:
+                return None
+            elt = ast.Starred(value=coerce_expr(expressions[-1]), ctx=ast.Load())
+            if update_opname == "LIST_EXTEND":
+                return make_list_comp(elt, generators)
+            return make_set_comp(elt, generators)
+
+        if update_opname == "DICT_UPDATE" and expressions:
+            return make_dict_comp(coerce_expr(expressions[-1]), None, generators)
 
         if update_opname == "MAP_ADD" and len(expressions) >= 2:
             key = coerce_expr(expressions[-2])

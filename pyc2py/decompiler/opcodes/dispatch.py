@@ -7,6 +7,7 @@ from pyc2py.astree import LINE_BREAK_ATTRIBUTE, make_assertion_error_name
 from pyc2py.bytecode.chained_compare import CHAINED_COMPARE_LINK
 from pyc2py.bytecode.instruction import Instruction
 from pyc2py.bytecode.opcode_table import normalized_opcode_name
+from pyc2py.bytecode.operand import import_is_lazy
 from pyc2py.decompiler.opcodes.flow import is_jump_op
 from pyc2py.decompiler.opcodes.stack_names import (
     LOAD_OPS,
@@ -382,6 +383,12 @@ def dispatch_format_call_instruction(decompiler: Any, instruction: Instruction) 
 
 def dispatch_import_attr_instruction(decompiler: Any, instruction: Instruction) -> bool:
     opname = normalized_opcode_name(instruction.opname)
+    if opname == "IMPORT_NAME":
+        decompiler.import_name(
+            str(instruction.argval),
+            lazy=import_is_lazy(int(instruction.arg or 0), decompiler.version),
+        )
+        return True
     if dispatch_noarg_method(decompiler, opname, IMPORT_ATTR_NOARG_METHODS):
         return True
     if dispatch_str_arg_method(

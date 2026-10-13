@@ -314,6 +314,10 @@ def name_index(opname: str, arg: int, version: tuple[int, ...]) -> int:
     return arg
 
 
+def import_is_lazy(arg: int, version: tuple[int, ...]) -> bool:
+    return version >= (3, 15) and bool(arg & 1)
+
+
 def compare_index(arg: int, version: tuple[int, ...]) -> int:
     if version >= (3, 13):
         return arg >> 5

@@ -74,6 +74,10 @@ def is_negated_imaginary(value: complex) -> bool:
     )
 
 
+def is_builtin_frozen_dict(value: Any) -> bool:
+    return type(value).__name__ == "frozendict" and type(value).__module__ == "builtins"
+
+
 def make_collection_constant(
     value: Any,
     legacy_strings_as_bytes: bool,
@@ -87,6 +91,8 @@ def make_collection_constant(
             sorted(value, key=constant_sort_key),
             legacy_strings_as_bytes,
         )
+    if is_builtin_frozen_dict(value):
+        return make_frozen_dict_call(dict(value).items())
     if isinstance(value, FrozenDictValue):
         return make_frozen_dict_constant(value)
     if isinstance(value, slice):
@@ -152,12 +158,16 @@ def make_constant_elements(
 
 
 def make_frozen_dict_constant(value: FrozenDictValue) -> ast.Call:
+    return make_frozen_dict_call(value.items)
+
+
+def make_frozen_dict_call(items: Any) -> ast.Call:
     return ast.Call(
         func=make_name("frozendict", ast.Load()),
         args=[
             ast.Dict(
-                keys=[make_constant(key) for key, _ in value.items],
-                values=[make_constant(value_) for _, value_ in value.items],
+                keys=[make_constant(key) for key, _ in items],
+                values=[make_constant(value_) for _, value_ in items],
             )
         ],
         keywords=[],

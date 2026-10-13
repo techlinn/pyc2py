@@ -831,7 +831,7 @@ class OpcodeCallRuntimeMixin(DecompilerContext, ABC):
             return
         self.warnings.append("MAKE_CLOSURE closure operand was not a tuple")
 
-    def import_name(self, name: str) -> None:
+    def import_name(self, name: str, lazy: bool = False) -> None:
         level: object = None
         fromlist: object = None
         if self.version is not None and self.version >= (2, 0):
@@ -839,7 +839,9 @@ class OpcodeCallRuntimeMixin(DecompilerContext, ABC):
         if self.version is not None and self.version >= (2, 5):
             level = self.pop_or_none()
 
-        self.stack.append(ImportValue(name=name, level=level, fromlist=fromlist))
+        self.stack.append(
+            ImportValue(name=name, level=level, fromlist=fromlist, lazy=lazy)
+        )
 
     def import_from(self, name: str) -> None:
         top = self.stack[-1] if self.stack else None

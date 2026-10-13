@@ -21,6 +21,7 @@ def make_name(name: str, ctx: ast.expr_context | None = None) -> ast.Name:
 
 
 LINE_BREAK_ATTRIBUTE = "_pyc2py_line_break"
+LAZY_IMPORT_MARK = "_pyc2py_lazy_import"
 LINE_BREAK_PREFIX = "_pyc2py_line_break_"
 LINE_BREAK_ALWAYS = "always"
 LINE_BREAK_IN_COMPREHENSION = "comprehension"
@@ -1907,3 +1908,31 @@ class LineKeepingUnparser(LineUnparserBase):
         depth, self.bracket_depth = self.bracket_depth, 0
         super().visit_JoinedStr(node)
         self.bracket_depth = depth
+
+    def visit_Import(self, node: ast.Import) -> None:
+        if not getattr(node, LAZY_IMPORT_MARK, False):
+            super().visit_Import(node)
+            return
+        self.fill("lazy import ")
+        self.interleave(lambda: self.write(", "), self.traverse, node.names)
+
+    def visit_DictComp(self, node: ast.DictComp) -> None:
+        if node.value is not None:
+            super().visit_DictComp(node)
+            return
+        self.write("{**")
+        self.traverse(node.key)
+        for generator in node.generators:
+            self.traverse(generator)
+        self.write("}")
+
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+        if not getattr(node, LAZY_IMPORT_MARK, False):
+            super().visit_ImportFrom(node)
+            return
+        self.fill("lazy from ")
+        self.write("." * (node.level or 0))
+        if node.module:
+            self.write(node.module)
+        self.write(" import ")
+        self.interleave(lambda: self.write(", "), self.traverse, node.names)
