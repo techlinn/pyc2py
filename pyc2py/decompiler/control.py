@@ -1,4 +1,5 @@
 import ast
+from abc import ABC
 from dataclasses import dataclass, replace
 from itertools import pairwise
 from typing import Any
@@ -62,7 +63,7 @@ class TargetedIfExpressionShape:
     store_index: int
 
 
-class ControlRecoveryMixin(ControlLoopRecoveryMixin):
+class ControlRecoveryMixin(ControlLoopRecoveryMixin, ABC):
     def try_translate_send_value(
         self,
         instructions: list[Instruction],
@@ -3141,31 +3142,6 @@ class ControlRecoveryMixin(ControlLoopRecoveryMixin):
         self.statements.append(ast.Return(value=value))
         return return_index + 1
 
-    def make_child(self) -> Any:
-        from pyc2py.decompiler.engine import NativeDecompiler
-
-        return NativeDecompiler(
-            code=self.code,
-            version=self.version,
-            is_module=False,
-            stack=self.stack.copy(),
-            kw_names=self.kw_names,
-            global_names=self.global_names,
-            loop_continue_offsets=self.loop_continue_offsets,
-            loop_break_offsets=self.loop_break_offsets,
-            loop_none_return_is_break=self.loop_none_return_is_break,
-            claimed_ranges=self.claimed_ranges,
-            active_handlers=self.active_handlers,
-            implicit_return_offsets=self.implicit_return_offsets,
-            written_return_offsets=self.written_return_offsets,
-            line_break_offsets=self.line_break_offsets,
-            detached_resume_offsets=self.detached_resume_offsets,
-            handler_exit_indexes=self.handler_exit_indexes,
-            compare_chain_links=self.compare_chain_links,
-            compare_chain_cleanups=self.compare_chain_cleanups,
-            budget=self.budget,
-        )
-
 
 def ends_in_return_line(instructions: list[Instruction], region: WithRegion) -> bool:
     last = instructions[region.body_end_index - 1]
@@ -3703,7 +3679,11 @@ def targeted_if_expression_shape(
         return None
 
     store_index = offset_to_index.get(int(join_jump.argval))
-    if store_index != false_index + 1 or store_index >= end_index:
+    if (
+        store_index is None
+        or store_index != false_index + 1
+        or store_index >= end_index
+    ):
         return None
     if instructions[store_index].opname not in {
         "STORE_DEREF",

@@ -1818,7 +1818,7 @@ def mark_default_lines(value: Any, nop_lines: list[int], line: int | None) -> No
             return
 
 
-def spread_default_lines(value: Any, defaults: list[ast.expr]) -> None:
+def spread_default_lines(value: object, defaults: list[ast.expr]) -> None:
     lines, def_line = getattr(value, DEFAULT_LINES_MARK, ((), None))
     if not lines or not defaults:
         return
@@ -1833,7 +1833,10 @@ def unparse_keeping_lines(module: ast.AST) -> str:
     return str(LineKeepingUnparser().visit(module))
 
 
-class LineKeepingUnparser(STANDARD_UNPARSER or object):  # type: ignore[misc]
+LineUnparserBase: Any = object if STANDARD_UNPARSER is None else STANDARD_UNPARSER
+
+
+class LineKeepingUnparser(LineUnparserBase):
     def __init__(self, **options: Any) -> None:
         super().__init__(**options)
         self.bracket_depth = 0

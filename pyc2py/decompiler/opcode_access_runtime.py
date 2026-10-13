@@ -1,4 +1,5 @@
 import ast
+from abc import ABC
 from typing import Any
 
 from pyc2py.astree import make_name, safe_identifier
@@ -39,7 +40,7 @@ from pyc2py.decompiler.structures import is_yield_expression
 from pyc2py.stack import FastStack
 
 
-class OpcodeAccessRuntimeMixin(DecompilerContext):
+class OpcodeAccessRuntimeMixin(DecompilerContext, ABC):
     def load_attr(self, name: str, arg: int = 0) -> None:
         raw_value = self.pop_or_none()
         if is_null_sentinel(coerce_expr(raw_value)) and self.stack:
@@ -405,10 +406,11 @@ class OpcodeAccessRuntimeMixin(DecompilerContext):
     def release_copied_store(self, value: Any) -> Any:
         if not getattr(value, "_pyc2py_copied_store", False):
             return value
-        self.statements.append(ast.Assign(targets=[value.target], value=value.value))
+        unwrapped = value.value
+        self.statements.append(ast.Assign(targets=[value.target], value=unwrapped))
         if self.stack and self.stack[-1] is value:
-            self.stack[-1] = value.value
-        return value.value
+            self.stack[-1] = unwrapped
+        return unwrapped
 
     def append_store_statement(self, statement: ast.stmt) -> None:
         if self.pending_simultaneous_store_count > 0:
@@ -418,9 +420,10 @@ class OpcodeAccessRuntimeMixin(DecompilerContext):
             self.pending_simultaneous_store_count -= 1
         self.statements.append(statement)
 
-    def expression_from_stack_value(self, value: Any) -> ast.expr:
+    def expression_from_stack_value(self, value: object) -> ast.expr:
         if isinstance(value, FunctionValue):
             node = make_lambda_expr(
+                self.new_child,
                 value.code,
                 self.version,
                 value.defaults,

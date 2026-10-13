@@ -16,3 +16,6 @@ dist/
 
 tmp_*/
 *.pyc.py
+
+uv.lock
+.venv/

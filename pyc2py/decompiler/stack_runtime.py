@@ -1,10 +1,10 @@
 import ast
-from typing import Any
+from abc import ABC
 
 from pyc2py.decompiler.context import DecompilerContext
 
 
-class StackRuntimeMixin(DecompilerContext):
+class StackRuntimeMixin(DecompilerContext, ABC):
     def duplicate_top(self) -> None:
         if not self.stack:
             self.warnings.append("DUP_TOP on empty stack")
@@ -70,7 +70,7 @@ class StackRuntimeMixin(DecompilerContext):
             for value in self.pop_many_raw(count)
         ]
 
-    def pop_many_raw(self, count: int) -> list[Any]:
+    def pop_many_raw(self, count: int) -> list[object]:
         if count < 0:
             raise ValueError("count must not be negative")
         if count <= len(self.stack):
@@ -80,7 +80,7 @@ class StackRuntimeMixin(DecompilerContext):
         values.reverse()
         return values
 
-    def pop_or_none(self) -> Any:
+    def pop_or_none(self) -> object:
         if self.stack:
             return self.stack.pop()
 

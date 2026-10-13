@@ -1,7 +1,8 @@
 import ast
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from itertools import pairwise
+from types import CodeType
 from typing import Any
 
 from pyc2py.astree import (
@@ -17,6 +18,7 @@ from pyc2py.bytecode.metadata import (
     make_offset_index,
     skip_ignorable_instructions,
 )
+from pyc2py.decompiler.context import DecompilerContext, UnpackSlot
 from pyc2py.decompiler.opcodes.imports_calls import (
     ImportedAttributeValue,
     ImportValue,
@@ -53,6 +55,8 @@ from pyc2py.decompiler.structures import (
 
 CO_HAS_DOCSTRING = 0x4000000
 
+ChildSpawner = Callable[[object], "DecompilerContext"]
+
 
 def has_code_docstring(code: Any, version: tuple[int, ...] | None) -> bool:
     # up to python 3.13 the first constant of a function is its docstring or
@@ -66,7 +70,7 @@ def has_code_docstring(code: Any, version: tuple[int, ...] | None) -> bool:
 
 @dataclass(frozen=True, slots=True)
 class FunctionValue:
-    code: Any
+    code: CodeType
     defaults: tuple[ast.expr, ...] = ()
     kw_defaults: dict[str, ast.expr] | None = None
     annotations: dict[str, ast.expr] | None = None
@@ -83,7 +87,7 @@ class BuildClassValue:
 
 @dataclass(frozen=True, slots=True)
 class ClassValue:
-    code: Any
+    code: CodeType
     bases: tuple[ast.expr, ...]
     type_params: tuple[ast.expr, ...] = ()
     keywords: tuple[ast.keyword, ...] = ()
@@ -113,26 +117,6 @@ class TypeAliasValue:
     type_params: tuple[ast.expr, ...] = ()
 
 
-@dataclass(frozen=True, slots=True)
-class UnpackSlot:
-    group: "UnpackGroup"
-    index: int
-
-
-@dataclass(slots=True)
-class UnpackGroup:
-    value: ast.expr
-    targets: list[ast.expr | None]
-    starred_index: int | None = None
-    parent: UnpackSlot | None = None
-
-
-def decompile_native_source(code: Any, version: tuple[int, ...] | None) -> Any | None:
-    from pyc2py.decompiler.engine import NativeDecompiler
-
-    return NativeDecompiler(code=code, version=version, is_module=True).decompile()
-
-
 def unpack_counts(instruction: Instruction) -> tuple[int, int | None]:
     if instruction.opname == "UNPACK_SEQUENCE_TWO_TUPLE":
         return 2, None
@@ -147,6 +131,7 @@ def unpack_counts(instruction: Instruction) -> tuple[int, int | None]:
 
 
 def make_function_def(
+    spawn: ChildSpawner,
     name: str,
     code: Any,
     version: tuple[int, ...] | None,
@@ -157,11 +142,7 @@ def make_function_def(
     type_params: tuple[ast.AST, ...] = (),
     annotate: FunctionValue | None = None,
 ) -> ast.FunctionDef | ast.AsyncFunctionDef:
-    from pyc2py.decompiler.engine import NativeDecompiler
-
-    body_result = NativeDecompiler(
-        code=code, version=version, is_module=False
-    ).decompile()
+    body_result = spawn(code).decompile()
     body_warnings = list(result_warnings(body_result))
     body_module = parse_body_or_empty(body_result, body_warnings)
     body = body_module.body or [ast.Pass()]
@@ -177,7 +158,9 @@ def make_function_def(
 
     resolved_annotations = annotations
     if resolved_annotations is None and annotate is not None:
-        resolved_annotations = function_annotations_from_code(annotate.code, version)
+        resolved_annotations = function_annotations_from_code(
+            spawn, annotate.code, version
+        )
     if resolved_annotations:
         apply_function_annotations(function, resolved_annotations)
 
@@ -187,16 +170,11 @@ def make_function_def(
 
 
 def function_annotations_from_code(
+    spawn: ChildSpawner,
     code: Any,
     version: tuple[int, ...] | None,
 ) -> dict[str, ast.expr] | None:
-    from pyc2py.decompiler.engine import NativeDecompiler
-
-    result = NativeDecompiler(
-        code=code,
-        version=version,
-        is_module=False,
-    ).decompile()
+    result = spawn(code).decompile()
     module = parse_body_or_empty(result)
     for statement in module.body:
         if isinstance(statement, ast.Return) and isinstance(statement.value, ast.Dict):
@@ -258,6 +236,7 @@ def function_annotation_arguments(arguments: ast.arguments) -> list[ast.arg]:
 
 
 def make_class_def(
+    spawn: ChildSpawner,
     name: str,
     code: Any,
     version: tuple[int, ...] | None,
@@ -266,11 +245,7 @@ def make_class_def(
     keywords: tuple[ast.keyword, ...] = (),
     decorators: tuple[ast.expr, ...] = (),
 ) -> ast.ClassDef:
-    from pyc2py.decompiler.engine import NativeDecompiler
-
-    body_result = NativeDecompiler(
-        code=code, version=version, is_module=False
-    ).decompile()
+    body_result = spawn(code).decompile()
     body_warnings = list(result_warnings(body_result))
     body_module = parse_body_or_empty(body_result, body_warnings)
     class_node = recover_make_class_node(name, bases, body_module.body)
@@ -282,10 +257,10 @@ def make_class_def(
 
 
 def make_class_value(
-    arguments: list[Any],
+    arguments: list[object],
     version: tuple[int, ...] | None,
     kw_names: tuple[str, ...] = (),
-) -> Any:
+) -> ClassValue | ast.Constant:
     keywords: tuple[ast.keyword, ...] = ()
     if kw_names and len(kw_names) <= len(arguments) - 2:
         keywords = tuple(
@@ -339,14 +314,13 @@ def make_class_bases(
 
 
 def make_lambda_expr(
+    spawn: ChildSpawner,
     code: Any,
     version: tuple[int, ...] | None,
     defaults: tuple[ast.expr, ...] = (),
     kw_defaults: dict[str, ast.expr] | None = None,
 ) -> ast.Lambda:
-    from pyc2py.decompiler.engine import NativeDecompiler
-
-    child = NativeDecompiler(code=code, version=version, is_module=False)
+    child = spawn(code)
     instructions = decode_instructions(code, version)
     statements = child.translate_range(instructions, 0, len(instructions))
     body: ast.expr = ast.Constant(value=None)
@@ -375,6 +349,7 @@ def make_lambda_node(
 
 
 def make_generator_expr(
+    spawn: ChildSpawner,
     code: Any,
     iterable: ast.expr,
     version: tuple[int, ...] | None,
@@ -389,6 +364,7 @@ def make_generator_expr(
         return None
 
     async_generator = make_async_generator_expr(
+        spawn,
         code,
         iterable,
         version,
@@ -400,7 +376,7 @@ def make_generator_expr(
         return async_generator
     if version is not None and version < (3, 13):
         read = make_function_comprehension(
-            code, iterable, version, instructions, load_iterator_index + 1
+            spawn, code, iterable, version, instructions, load_iterator_index + 1
         )
         if isinstance(read, ast.GeneratorExp):
             return read
@@ -412,10 +388,11 @@ def make_generator_expr(
     )
     if shape is None:
         return None
-    return make_sync_generator_expr(code, iterable, version, shape)
+    return make_sync_generator_expr(spawn, code, iterable, version, shape)
 
 
 def make_sync_generator_expr(
+    spawn: ChildSpawner,
     code: Any,
     iterable: ast.expr,
     version: tuple[int, ...] | None,
@@ -432,13 +409,14 @@ def make_sync_generator_expr(
         return None
 
     if has_test_inside_element(instructions, shape, yield_index):
-        structured = make_structured_generator_expr(code, iterable, version)
+        structured = make_structured_generator_expr(spawn, code, iterable, version)
         if structured is not None:
             return structured
 
     generators = [make_generator(target=shape.target, iterator=iterable)]
     expression_scan_start = shape.store_index + 1
     nested = read_nested_generator_loop(
+        spawn,
         code,
         version,
         instructions,
@@ -451,6 +429,7 @@ def make_sync_generator_expr(
         generators.append(nested_generator)
 
     expression_start, conditions = read_generator_conditions(
+        spawn,
         code,
         version,
         instructions,
@@ -460,7 +439,7 @@ def make_sync_generator_expr(
         int(instructions[shape.for_iter_index].offset),
     )
     element = evaluate_generator_expression(
-        code, version, instructions, expression_start, yield_index
+        spawn, code, version, instructions, expression_start, yield_index
     )
     if element is None:
         return None
@@ -485,13 +464,12 @@ def has_test_inside_element(
 
 
 def make_structured_generator_expr(
+    spawn: ChildSpawner,
     code: Any,
     iterable: ast.expr,
     version: tuple[int, ...] | None,
 ) -> ast.GeneratorExp | None:
-    from pyc2py.decompiler.engine import NativeDecompiler
-
-    child = NativeDecompiler(code=code, version=version, is_module=False)
+    child = spawn(code)
     instructions = decode_instructions(code, version)
     body = child.translate_range(instructions, 0, len(instructions))
     if body and isinstance(body[-1], ast.Return):
@@ -528,13 +506,14 @@ def read_generator_tests(
 
 
 def make_comprehension_expr(
+    spawn: ChildSpawner,
     code: Any,
     iterable: ast.expr,
     version: tuple[int, ...] | None,
 ) -> ast.expr | None:
     code_name = str(getattr(code, "co_name", ""))
     if code_name == "<genexpr>":
-        return make_generator_expr(code, iterable, version)
+        return make_generator_expr(spawn, code, iterable, version)
     if code_name not in {"<listcomp>", "<setcomp>", "<dictcomp>"}:
         return None
 
@@ -545,7 +524,7 @@ def make_comprehension_expr(
         return None
     if version is not None and version < (3, 12):
         return make_function_comprehension(
-            code, iterable, version, instructions, load_iterator_index + 1
+            spawn, code, iterable, version, instructions, load_iterator_index + 1
         )
 
     shape = read_comprehension_loop_shape(
@@ -555,19 +534,20 @@ def make_comprehension_expr(
     )
     if shape is None:
         return None
-    return make_sync_comprehension_expr(code, iterable, version, code_name, shape)
+    return make_sync_comprehension_expr(
+        spawn, code, iterable, version, code_name, shape
+    )
 
 
 def make_function_comprehension(
+    spawn: ChildSpawner,
     code: Any,
     iterable: ast.expr,
     version: tuple[int, ...],
     instructions: list[Instruction],
     for_iter_index: int,
 ) -> ast.expr | None:
-    from pyc2py.decompiler.engine import NativeDecompiler
-
-    child = NativeDecompiler(code=code, version=version, is_module=False)
+    child = spawn(code)
     offset_to_index = make_offset_index(instructions)
     value: ast.expr | None = None
     if instructions[for_iter_index].opname == "FOR_ITER":
@@ -590,6 +570,7 @@ AWAITED_BY_CALLER_MARK = "_pyc2py_awaited_by_caller"
 
 
 def make_sync_comprehension_expr(
+    spawn: ChildSpawner,
     code: Any,
     iterable: ast.expr,
     version: tuple[int, ...] | None,
@@ -608,6 +589,7 @@ def make_sync_comprehension_expr(
         return None
 
     expression_start, conditions = read_generator_conditions(
+        spawn,
         code,
         version,
         instructions,
@@ -617,6 +599,7 @@ def make_sync_comprehension_expr(
         int(instructions[shape.for_iter_index].offset),
     )
     stack_values = evaluate_expression_stack(
+        spawn,
         code,
         version,
         instructions,
@@ -686,6 +669,7 @@ def read_comprehension_loop_shape(
 
 
 def make_async_generator_expr(
+    spawn: ChildSpawner,
     code: Any,
     iterable: ast.expr,
     version: tuple[int, ...] | None,
@@ -723,6 +707,7 @@ def make_async_generator_expr(
         ctx=ast.Store(),
     )
     expression_start, conditions = read_generator_conditions(
+        spawn,
         code,
         version,
         instructions,
@@ -732,7 +717,7 @@ def make_async_generator_expr(
         int(instructions[get_anext_index].offset),
     )
     element = evaluate_generator_expression(
-        code, version, instructions, expression_start, yield_wrap_index
+        spawn, code, version, instructions, expression_start, yield_wrap_index
     )
     if element is None:
         return None
@@ -903,6 +888,7 @@ def find_generator_yield(
 
 
 def read_nested_generator_loop(
+    spawn: ChildSpawner,
     code: Any,
     version: tuple[int, ...] | None,
     instructions: list[Instruction],
@@ -919,6 +905,7 @@ def read_nested_generator_loop(
         return None
 
     iterator = evaluate_generator_expression(
+        spawn,
         code,
         version,
         instructions,
@@ -992,6 +979,7 @@ def find_nested_generator_get_iter(
 
 
 def read_generator_conditions(
+    spawn: ChildSpawner,
     code: Any,
     version: tuple[int, ...] | None,
     instructions: list[Instruction],
@@ -1010,7 +998,7 @@ def read_generator_conditions(
             return cursor, conditions
 
         condition = evaluate_generator_expression(
-            code, version, instructions, cursor, jump_index
+            spawn, code, version, instructions, cursor, jump_index
         )
         if condition is None:
             return start_index, []
@@ -1070,6 +1058,7 @@ def is_backward_condition_jump(instruction: Instruction, loop_offset: int) -> bo
 
 
 def evaluate_generator_expression(
+    spawn: ChildSpawner,
     code: Any,
     version: tuple[int, ...] | None,
     instructions: list[Instruction],
@@ -1077,6 +1066,7 @@ def evaluate_generator_expression(
     end_index: int,
 ) -> ast.expr | None:
     conditional = evaluate_conditional_expression(
+        spawn,
         code,
         version,
         instructions,
@@ -1085,11 +1075,14 @@ def evaluate_generator_expression(
     )
     if conditional is not None:
         return conditional
-    chain = evaluate_compare_chain(code, version, instructions, start_index, end_index)
+    chain = evaluate_compare_chain(
+        spawn, code, version, instructions, start_index, end_index
+    )
     if chain is not None:
         return chain
 
     values = evaluate_expression_stack(
+        spawn,
         code,
         version,
         instructions,
@@ -1102,20 +1095,19 @@ def evaluate_generator_expression(
 
 
 def evaluate_compare_chain(
+    spawn: ChildSpawner,
     code: Any,
     version: tuple[int, ...] | None,
     instructions: list[Instruction],
     start_index: int,
     end_index: int,
 ) -> ast.expr | None:
-    from pyc2py.decompiler.engine import NativeDecompiler
-
     if not any(
         first.opname == "SWAP" and second.opname == "COPY"
         for first, second in pairwise(instructions[start_index:end_index])
     ):
         return None
-    child = NativeDecompiler(code=code, version=version, is_module=False)
+    child = spawn(code)
     value: ast.expr | None = child.evaluate_expression_range(
         instructions, start_index, end_index
     )
@@ -1123,6 +1115,7 @@ def evaluate_compare_chain(
 
 
 def evaluate_conditional_expression(
+    spawn: ChildSpawner,
     code: Any,
     version: tuple[int, ...] | None,
     instructions: list[Instruction],
@@ -1164,6 +1157,7 @@ def evaluate_conditional_expression(
             continue
 
         test = evaluate_generator_expression(
+            spawn,
             code,
             version,
             instructions,
@@ -1171,6 +1165,7 @@ def evaluate_conditional_expression(
             jump_index + 1,
         )
         body = evaluate_generator_expression(
+            spawn,
             code,
             version,
             instructions,
@@ -1178,6 +1173,7 @@ def evaluate_conditional_expression(
             body_end,
         )
         orelse = evaluate_generator_expression(
+            spawn,
             code,
             version,
             instructions,
@@ -1211,15 +1207,14 @@ def find_conditional_expression_body_end(
 
 
 def evaluate_expression_stack(
+    spawn: ChildSpawner,
     code: Any,
     version: tuple[int, ...] | None,
     instructions: list[Instruction],
     start_index: int,
     end_index: int,
 ) -> list[ast.expr]:
-    from pyc2py.decompiler.engine import NativeDecompiler
-
-    child = NativeDecompiler(code=code, version=version, is_module=False)
+    child = spawn(code)
     starting_depth = len(child.stack)
     pending_conditions: list[ast.expr] = []
     for instruction in instructions[start_index:end_index]:

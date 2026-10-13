@@ -252,7 +252,7 @@ CO_ASYNC_GENERATOR = 0x200
 CO_FUTURE_ANNOTATIONS = 0x1000000
 
 
-def stores_annotation_text(code: Any) -> bool:
+def stores_annotation_text(code: object) -> bool:
     return bool(int(getattr(code, "co_flags", 0) or 0) & CO_FUTURE_ANNOTATIONS)
 
 

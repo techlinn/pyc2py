@@ -1,4 +1,5 @@
 import ast
+from abc import ABC
 from dataclasses import dataclass
 
 from pyc2py.astree import make_name, mark_line
@@ -50,7 +51,7 @@ class LoopBreakExit:
     tail_is_detached: bool = False
 
 
-class ControlLoopRecoveryMixin(ControlComprehensionRecoveryMixin):
+class ControlLoopRecoveryMixin(ControlComprehensionRecoveryMixin, ABC):
     def try_translate_modern_infinite_while_loop(
         self,
         instructions: list[Instruction],
@@ -817,8 +818,8 @@ class ControlLoopRecoveryMixin(ControlComprehensionRecoveryMixin):
             target, cursor = self.read_unpack_loop_target(
                 instructions, start_index, end_index
             )
-        if target is not None:
-            return target, cursor
+            if target is not None:
+                return target, cursor
         return self.read_stored_loop_target(instructions, start_index, end_index)
 
     def read_stored_loop_target(

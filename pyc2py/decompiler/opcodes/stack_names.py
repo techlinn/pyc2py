@@ -60,5 +60,5 @@ def is_annotations_name(value: ast.expr) -> bool:
     return isinstance(value, ast.Name) and value.id == "__annotations__"
 
 
-def is_null_sentinel(value: ast.expr) -> bool:
+def is_null_sentinel(value: object) -> bool:
     return isinstance(value, ast.Name) and value.id == "NULL"

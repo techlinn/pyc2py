@@ -232,8 +232,9 @@ def read_legacy_sensitive_string(
     if type_code == ord("s") or version < (3, 0):
         raw, offset = read_bytes(data, offset)
         if version < (3, 0):
-            return LegacyByteString(
-                raw.decode("latin-1", errors="surrogateescape")
-            ), offset
+            return (
+                LegacyByteString(raw.decode("latin-1", errors="surrogateescape")),
+                offset,
+            )
         return raw, offset
     return read_text(data, offset)

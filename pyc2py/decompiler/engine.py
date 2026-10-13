@@ -18,7 +18,7 @@ from pyc2py.bytecode.decoder import decode_instructions
 from pyc2py.bytecode.instruction import IGNORED_BEHAVIOR_OPNAMES, Instruction
 from pyc2py.bytecode.metadata import make_offset_index
 from pyc2py.bytecode.opcode_table import normalized_opcode_name
-from pyc2py.decompiler.context import ReadBudget
+from pyc2py.decompiler.context import NativeResult, ReadBudget, UnpackGroup
 from pyc2py.decompiler.control import ControlRecoveryMixin
 from pyc2py.decompiler.control_comprehension import INLINE_CLEANUP_OPS
 from pyc2py.decompiler.exception_structures import (
@@ -57,14 +57,6 @@ from pyc2py.decompiler.variable_annotations import restore_variable_annotations
 from pyc2py.stack import FastStack
 from pyc2py.types import LiveWarningList, ProgressCallback
 
-
-@dataclass(slots=True)
-class NativeResult:
-    source: str
-    warnings: tuple[str, ...]
-    body: tuple[ast.stmt, ...] | None = None
-
-
 READ_STEPS_PER_INSTRUCTION = 100
 READ_STEPS_ALLOWANCE = 10_000
 
@@ -80,15 +72,15 @@ class NativeDecompiler(
     StackRuntimeMixin,
     OpcodeRuntimeMixin,
 ):
-    code: Any
+    code: object
     version: tuple[int, ...] | None
     is_module: bool = True
     progress: ProgressCallback | None = None
-    stack: FastStack[Any] = field(default_factory=FastStack)
+    stack: FastStack[object] = field(default_factory=FastStack[object])
     statements: list[ast.stmt] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     kw_names: tuple[str, ...] = ()
-    unpack_groups: list[Any] = field(default_factory=list)
+    unpack_groups: list[UnpackGroup] = field(default_factory=list)
     pending_print_items: list[ast.expr] = field(default_factory=list)
     pending_print_target: ast.expr | None = None
     global_names: list[str] = field(default_factory=list)
@@ -118,6 +110,32 @@ class NativeDecompiler(
     def __post_init__(self) -> None:
         if self.progress is not None and type(self.warnings) is list:
             self.warnings = LiveWarningList(self.progress, prefix="warning: native: ")
+
+    def new_child(self, code: object) -> "NativeDecompiler":
+        return NativeDecompiler(code=code, version=self.version, is_module=False)
+
+    def make_child(self) -> "NativeDecompiler":
+        return NativeDecompiler(
+            code=self.code,
+            version=self.version,
+            is_module=False,
+            stack=self.stack.copy(),
+            kw_names=self.kw_names,
+            global_names=self.global_names,
+            loop_continue_offsets=self.loop_continue_offsets,
+            loop_break_offsets=self.loop_break_offsets,
+            loop_none_return_is_break=self.loop_none_return_is_break,
+            claimed_ranges=self.claimed_ranges,
+            active_handlers=self.active_handlers,
+            implicit_return_offsets=self.implicit_return_offsets,
+            written_return_offsets=self.written_return_offsets,
+            line_break_offsets=self.line_break_offsets,
+            detached_resume_offsets=self.detached_resume_offsets,
+            handler_exit_indexes=self.handler_exit_indexes,
+            compare_chain_links=self.compare_chain_links,
+            compare_chain_cleanups=self.compare_chain_cleanups,
+            budget=self.budget,
+        )
 
     def uses_unicode_literals(self) -> bool:
         flags = int(getattr(self.code, "co_flags", 0) or 0)
@@ -151,7 +169,7 @@ class NativeDecompiler(
         if self.version is not None and self.version >= (3, 14):
             self.statements = merge_copied_return_branches(self.statements)
             self.statements = restore_variable_annotations(
-                self.statements, instructions, self.version
+                self.statements, instructions, self.version, self.new_child
             )
         body = clean_decompiled_body(self.statements, self.is_module)
         if self.is_module:
@@ -173,7 +191,7 @@ class NativeDecompiler(
                 body, find_explicit_nonlocal_names(self.code, instructions)
             )
         if not body and not self.is_module:
-            body = [ast.Pass()]
+            body.append(ast.Pass())
         self.warnings.extend(take_scope_warnings(body))
         self.emit_progress("fixing AST locations")
         module = ast.fix_missing_locations(ast.Module(body=body, type_ignores=[]))
@@ -401,6 +419,7 @@ class NativeDecompiler(
             or compare.comparators[-1] is not middle
         ):
             return None
+        middle = compare.comparators[-1]
         jump_index = next_non_metadata_index(instructions, cursor + 1)
         if jump_index is not None and instructions[jump_index].opname == "TO_BOOL":
             jump_index = next_non_metadata_index(instructions, jump_index + 1)
@@ -433,6 +452,7 @@ class NativeDecompiler(
             or compare.comparators[-1] is not middle
         ):
             return None
+        middle = compare.comparators[-1]
         cleanup_index = offset_to_index.get(jump.argval)
         if cleanup_index is None or instructions[cleanup_index].opname != "SWAP":
             return None
@@ -456,6 +476,7 @@ class NativeDecompiler(
             or compare.comparators[-1] is not middle
         ):
             return None
+        middle = compare.comparators[-1]
         cleanup_index = offset_to_index.get(jump.argval)
         if cleanup_index is None or instructions[cleanup_index].opname != "POP_TOP":
             return None

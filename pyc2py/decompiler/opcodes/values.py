@@ -1,5 +1,6 @@
 import ast
 import math
+from types import CodeType
 from typing import Any
 
 from pyc2py.astree import constant_sort_key, is_none_constant, make_name
@@ -13,8 +14,14 @@ from pyc2py.pyc.objects import (
 EMPTY_SLICE_STEP_NAME = "__pyc2py_empty_slice_step__"
 
 
-def is_code_constant(value: Any) -> bool:
+def is_code_constant(value: object) -> bool:
     return isinstance(value, ast.Constant) and hasattr(value.value, "co_code")
+
+
+def code_from_constant(value: object) -> CodeType | None:
+    if isinstance(value, ast.Constant) and isinstance(value.value, CodeType):
+        return value.value
+    return None
 
 
 def is_zero_constant(value: Any) -> bool:

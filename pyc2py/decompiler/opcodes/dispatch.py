@@ -1,5 +1,6 @@
 import ast
 import math
+from collections.abc import Mapping
 from typing import Any
 
 from pyc2py.astree import LINE_BREAK_ATTRIBUTE, make_assertion_error_name
@@ -548,7 +549,7 @@ def dispatch_opname_prefix_method(
 def dispatch_statement_node(
     decompiler: Any,
     opname: str,
-    nodes: dict[str, type[ast.stmt]],
+    nodes: Mapping[str, type[ast.stmt]],
 ) -> bool:
     node_type = nodes.get(opname)
     if node_type is None:

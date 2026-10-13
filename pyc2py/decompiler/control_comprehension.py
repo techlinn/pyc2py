@@ -1,4 +1,5 @@
 import ast
+from abc import ABC
 from dataclasses import dataclass
 from typing import Any
 
@@ -98,7 +99,7 @@ def is_valid_inlined_first_swap(
     return instruction.arg in {2, save_count + 1}
 
 
-class ControlComprehensionRecoveryMixin(DecompilerContext):
+class ControlComprehensionRecoveryMixin(DecompilerContext, ABC):
     def try_translate_legacy_list_comprehension(
         self,
         instructions: list[Instruction],

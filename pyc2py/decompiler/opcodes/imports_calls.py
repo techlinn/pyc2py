@@ -9,8 +9,8 @@ from pyc2py.decompiler.opcodes.stack_names import is_null_sentinel
 @dataclass(frozen=True, slots=True)
 class ImportValue:
     name: str
-    level: ast.Constant | None
-    fromlist: ast.Constant | None
+    level: object
+    fromlist: object
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,8 +65,8 @@ def is_dotted_import_alias(store_name: str, value: ImportedAttributeValue) -> bo
     return value.module.name.endswith(f".{value.name}") and store_name != value.name
 
 
-def is_none_fromlist(value: ast.Constant | None) -> bool:
-    return value is None or value.value is None
+def is_none_fromlist(value: object) -> bool:
+    return value is None or (isinstance(value, ast.Constant) and value.value is None)
 
 
 def make_import_star_statement(value: ImportValue) -> ast.ImportFrom:
@@ -77,7 +77,7 @@ def make_import_star_statement(value: ImportValue) -> ast.ImportFrom:
     )
 
 
-def get_import_level(value: ast.Constant | None) -> int:
+def get_import_level(value: object) -> int:
     if isinstance(value, ast.Constant) and isinstance(value.value, int):
         return max(0, value.value)
     return 0

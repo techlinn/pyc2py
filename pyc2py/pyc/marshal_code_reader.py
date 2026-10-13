@@ -1,5 +1,5 @@
 from collections.abc import Callable
-from typing import Any
+from typing import Any, Protocol
 
 from pyc2py.pyc.code import (
     PycCode,
@@ -16,7 +16,7 @@ from pyc2py.pyc.primitives import read_int16, read_int32
 from pyc2py.pyc.reference import ReferenceTable
 
 
-class MarshalCodeReaderMixin:
+class MarshalCodeReaderMixin(Protocol):
     data: bytes
     version: tuple[int, ...]
     refs: ReferenceTable

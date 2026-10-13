@@ -1,10 +1,14 @@
 import ast
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pyc2py.astree import is_docstring_statement
 from pyc2py.bytecode.instruction import Instruction
 from pyc2py.decompiler.recover import append_annotation_statement
+
+if TYPE_CHECKING:
+    from pyc2py.decompiler.context import DecompilerContext
 
 ANNOTATE_NAMES = frozenset({"__annotate__", "__annotate_func__"})
 CONDITIONAL_SET = "__conditional_annotations__"
@@ -21,12 +25,13 @@ def restore_variable_annotations(
     statements: list[ast.stmt],
     instructions: list[Instruction],
     version: tuple[int, ...] | None,
+    new_child: Callable[[object], "DecompilerContext"],
 ) -> list[ast.stmt]:
     statements = [item for item in statements if not assigns_conditional_set(item)]
     code = find_annotate_code(instructions)
     if code is None:
         return statements
-    annotations = read_variable_annotations(code, version)
+    annotations = read_variable_annotations(code, version, new_child)
     if annotations is None:
         return statements
     body = [item for item in statements if not is_annotate_function(item)]
@@ -54,13 +59,13 @@ def find_annotate_code(instructions: list[Instruction]) -> Any:
 def read_variable_annotations(
     code: Any,
     version: tuple[int, ...] | None,
+    new_child: Callable[[object], "DecompilerContext"],
 ) -> list[VariableAnnotation] | None:
     from pyc2py.bytecode.decoder import decode_instructions
-    from pyc2py.decompiler.engine import NativeDecompiler
     from pyc2py.decompiler.runtime import parse_body_or_empty
 
     stores = read_annotation_stores(decode_instructions(code, version))
-    result = NativeDecompiler(code=code, version=version, is_module=False).decompile()
+    result = new_child(code).decompile()
     returned = [
         statement.value
         for statement in parse_body_or_empty(result).body

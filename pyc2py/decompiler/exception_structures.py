@@ -190,7 +190,7 @@ def try_translate_exception_table_except(
             pattern,
         )
         if protected_return is not None:
-            body = [protected_return]
+            body.append(protected_return)
 
     handler_body = decompiler.translate_child_statements(
         instructions,

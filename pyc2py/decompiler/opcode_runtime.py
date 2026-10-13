@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import ast
-from typing import Any
+from abc import ABC
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any
 
 from pyc2py.astree import (
     make_assertion_error_name,
@@ -13,7 +15,11 @@ from pyc2py.astree import (
 )
 from pyc2py.bytecode.instruction import Instruction
 from pyc2py.bytecode.opcode_table import normalized_opcode_name
+from pyc2py.decompiler.context import UnpackGroup, UnpackSlot
 from pyc2py.decompiler.opcode_access_runtime import OpcodeAccessRuntimeMixin
+
+if TYPE_CHECKING:
+    from pyc2py.decompiler.context import DecompilerContext
 from pyc2py.decompiler.opcode_call_runtime import OpcodeCallRuntimeMixin
 from pyc2py.decompiler.opcodes.builders import (
     append_to_container,
@@ -53,8 +59,6 @@ from pyc2py.decompiler.runtime import (
     FunctionValue,
     HiddenLocalRestore,
     TypeAliasValue,
-    UnpackGroup,
-    UnpackSlot,
     coerce_expr,
     make_class_def,
     make_function_def,
@@ -76,7 +80,7 @@ LINE_START_LOADS = {
 }
 
 
-class OpcodeRuntimeMixin(OpcodeCallRuntimeMixin, OpcodeAccessRuntimeMixin):
+class OpcodeRuntimeMixin(OpcodeCallRuntimeMixin, OpcodeAccessRuntimeMixin, ABC):
     def run_instruction(self, instruction: Instruction) -> None:
         if instruction.starts_line is not None or instruction.opname == "SET_LINENO":
             self.flush_legacy_line_boundary()
@@ -135,7 +139,7 @@ class OpcodeRuntimeMixin(OpcodeCallRuntimeMixin, OpcodeAccessRuntimeMixin):
         if isinstance(value, UnpackSlot):
             self.store_unpack_slot(value, name, opname)
             return STORE_NAME_HANDLED
-        return make_named_value_statement(name, value, self.version)
+        return make_named_value_statement(self.new_child, name, value, self.version)
 
     def store_hidden_local_restore(
         self,
@@ -224,7 +228,9 @@ class OpcodeRuntimeMixin(OpcodeCallRuntimeMixin, OpcodeAccessRuntimeMixin):
             setattr(target, "_pyc2py_force_tuple_unpack", True)
         self.store_unpack_target(slot, target)
 
-    def store_unpack_target(self, slot: UnpackSlot, target: ast.expr) -> None:
+    def store_unpack_target(self, slot: object, target: ast.expr) -> None:
+        if not isinstance(slot, UnpackSlot):
+            return
         if slot.group.starred_index == slot.index:
             target = ast.Starred(value=target, ctx=ast.Store())
         slot.group.targets[slot.index] = target
@@ -658,16 +664,17 @@ def make_unpack_assignment_target(targets: list[ast.expr]) -> ast.expr:
 
 
 def make_named_value_statement(
+    new_child: Callable[[object], DecompilerContext],
     name: str,
     value: Any,
     version: tuple[int, ...] | None,
 ) -> ast.stmt | None:
     if isinstance(value, FunctionValue):
-        return make_function_store_statement(name, value, version)
+        return make_function_store_statement(new_child, name, value, version)
     if isinstance(value, TypeAliasValue):
         return make_type_alias_statement(name, value)
     if isinstance(value, ClassValue):
-        return make_class_store_statement(name, value, version)
+        return make_class_store_statement(new_child, name, value, version)
     if isinstance(value, ImportValue):
         return make_import_statement(name, value)
     if isinstance(value, ImportedAttributeValue):
@@ -676,6 +683,7 @@ def make_named_value_statement(
 
 
 def make_function_store_statement(
+    new_child: Callable[[object], DecompilerContext],
     name: str,
     value: FunctionValue,
     version: tuple[int, ...] | None,
@@ -684,6 +692,7 @@ def make_function_store_statement(
         return ast.Assign(
             targets=[make_name(name, ast.Store())],
             value=make_lambda_expr(
+                new_child,
                 value.code,
                 version,
                 value.defaults,
@@ -691,11 +700,12 @@ def make_function_store_statement(
             ),
         )
 
-    type_alias = make_type_alias_from_generic_function(name, value, version)
+    type_alias = make_type_alias_from_generic_function(new_child, name, value, version)
     if type_alias is not None:
         return type_alias
 
     return make_function_def(
+        new_child,
         name,
         value.code,
         version,
@@ -709,11 +719,13 @@ def make_function_store_statement(
 
 
 def make_class_store_statement(
+    new_child: Callable[[object], DecompilerContext],
     name: str,
     value: ClassValue,
     version: tuple[int, ...] | None,
 ) -> ast.stmt:
     return make_class_def(
+        new_child,
         name,
         value.code,
         version,
@@ -796,6 +808,7 @@ def make_type_alias_statement_with_params(
 
 
 def make_type_alias_from_generic_function(
+    new_child: Callable[[object], DecompilerContext],
     name: str,
     value: FunctionValue,
     version: tuple[int, ...] | None,
@@ -804,13 +817,7 @@ def make_type_alias_from_generic_function(
     if not code_name.startswith("<generic parameters of "):
         return None
 
-    from pyc2py.decompiler.engine import NativeDecompiler
-
-    result = NativeDecompiler(
-        code=value.code,
-        version=version,
-        is_module=False,
-    ).decompile()
+    result = new_child(value.code).decompile()
     module = parse_body_or_empty(result)
 
     for statement in module.body:

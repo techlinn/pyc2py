@@ -1,4 +1,5 @@
 import ast
+from abc import ABC
 from typing import TypeGuard
 
 from pyc2py.astree import make_name
@@ -6,7 +7,7 @@ from pyc2py.decompiler.context import DecompilerContext
 from pyc2py.decompiler.runtime import coerce_expr
 
 
-class PrintRuntimeMixin(DecompilerContext):
+class PrintRuntimeMixin(DecompilerContext, ABC):
     def flush_legacy_line_boundary(self) -> None:
         if self.pending_print_items or self.pending_print_target is not None:
             self.flush_print_items(newline=False)

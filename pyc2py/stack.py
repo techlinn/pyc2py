@@ -1,6 +1,6 @@
 from collections.abc import Iterable, Iterator, MutableSequence
 from dataclasses import dataclass, field
-from typing import Generic, TypeVar, overload
+from typing import Generic, TypeVar, cast, overload
 
 from pyc2py.bytecode.instruction import Instruction
 from pyc2py.bytecode.stack_effect import instruction_stack_effect
@@ -48,9 +48,9 @@ class FastStack(Generic[T], MutableSequence[T]):
 
     def __setitem__(self, index: int | slice, value: T | Iterable[T]) -> None:
         if isinstance(index, slice):
-            self.values[index] = list(value)  # type: ignore[arg-type]
+            self.values[index] = list(cast("Iterable[T]", value))
         else:
-            self.values[index] = value  # type: ignore[assignment]
+            self.values[index] = cast("T", value)
         self.check_depth()
 
     def __delitem__(self, index: int | slice) -> None:

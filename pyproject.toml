@@ -28,6 +28,12 @@ target-version = "py310"
 select = ["C4", "C901", "E", "F", "I", "PERF", "PIE", "RUF", "SIM", "UP", "W"]
 ignore = ["E501"]
 
+[tool.ruff.lint.per-file-ignores]
+# DecompilerContext is a protocol-style interface: its mutable defaults exist
+# only to declare member types and are always shadowed by NativeDecompiler's
+# dataclass fields, so RUF012's shared-state concern cannot occur there.
+"pyc2py/decompiler/context.py" = ["RUF012"]
+
 [tool.mypy]
 python_version = "3.10"
 ignore_missing_imports = true
