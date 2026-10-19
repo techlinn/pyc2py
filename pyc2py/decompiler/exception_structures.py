@@ -2,14 +2,20 @@ import ast
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from itertools import pairwise
+from typing import cast
 
-from pyc2py.bytecode.instruction import Instruction
+from pyc2py.bytecode.instruction import Instruction, is_none_load, is_none_return
 from pyc2py.bytecode.metadata import (
     ExceptionTableEntry,
+    line_in_effect,
     make_offset_index,
+    once_per_inputs,
     parse_exception_table,
 )
-from pyc2py.bytecode.opcode_table import NAME_OPS
+from pyc2py.bytecode.opcode_table import (
+    FORWARD_JUMPS,
+    NAME_OPS,
+)
 from pyc2py.decompiler.context import DecompilerContext
 from pyc2py.decompiler.opcodes.flow import (
     is_jump_op,
@@ -198,8 +204,8 @@ def try_translate_exception_table_except(
         pattern.handler_body_end_index,
     )
     handler_body = remove_named_exception_cleanup(handler_body, pattern.name)
-
     trailing_body = []
+
     if (
         pattern.trailing_start_index is not None
         and pattern.trailing_end_index is not None
@@ -225,12 +231,23 @@ def try_translate_exception_table_except(
                     body=handler_body or [ast.Pass()],
                 )
             ],
-            orelse=[],
+            orelse=else_of_table_except(decompiler, instructions, pattern),
             finalbody=[],
         )
     )
     decompiler.statements.extend(trailing_body)
     return pattern.after_index
+
+
+def else_of_table_except(
+    decompiler: DecompilerContext,
+    instructions: list[Instruction],
+    pattern: ExceptionTableExceptPattern,
+) -> list[ast.stmt]:
+    leave = leaving_jump_behind_body(
+        decompiler, instructions, pattern.body_end_index, pattern.handler_start_index
+    )
+    return [] if leave is None else [leave[1]]
 
 
 def protected_cleanup_return_statement(
@@ -265,11 +282,13 @@ def has_cleanup_return_suffix(
         return False
 
     saw_cleanup = False
+
     while cursor + 1 < end_index:
         if instructions[cursor].opname != "SWAP":
             break
         if instructions[cursor + 1].opname != "POP_TOP":
             break
+
         saw_cleanup = True
         cursor += 2
 
@@ -296,7 +315,6 @@ def try_translate_exception_table_finally(
     )
     if pattern is None:
         return None
-
     if pattern.handler_final_range is None:
         claim_finally_copies_before_return(
             decompiler,
@@ -305,6 +323,7 @@ def try_translate_exception_table_finally(
             (pattern.final_start_index, pattern.final_end_index),
             pattern.handler_index,
         )
+
     body = exception_table_finally_body(decompiler, instructions, pattern)
     final_body = translate_finally_block(
         decompiler,
@@ -332,13 +351,14 @@ def try_translate_exception_table_finally(
 
 def inline_finally_copy(
     instructions: list[Instruction],
-    pattern: "OutOfLineTryPattern",
+    pattern: OutOfLineTryPattern,
 ) -> tuple[int, int] | None:
     final_end_index = pattern.final_end_index
     if final_end_index is None or pattern.handler_final_range is not None:
         return None
     if pattern.final_start_index is not None:
         return None
+
     start_index = inline_finally_start(
         instructions, pattern.body_end_index, pattern.handler_index + 1
     )
@@ -351,20 +371,24 @@ def inline_finally_start(
     copy_start_index: int,
 ) -> int:
     start_index = body_end_index
+
     if instructions[copy_start_index].opname == "NOP":
         return start_index
+
     while instructions[start_index].opname == "NOP":
         start_index += 1
+
     return start_index
 
 
 def claim_finally_copies(
     decompiler: DecompilerContext,
     instructions: list[Instruction],
-    pattern: "OutOfLineTryPattern",
+    pattern: OutOfLineTryPattern,
 ) -> None:
     final_range = inline_finally_copy(instructions, pattern)
     body_ranges = [(pattern.body_start_index, pattern.handler_index)]
+
     if final_range is not None:
         body_ranges = [
             (pattern.body_start_index, pattern.body_end_index),
@@ -372,9 +396,11 @@ def claim_finally_copies(
         ]
     elif pattern.final_start_index is not None and pattern.final_end_index is not None:
         final_range = (pattern.final_start_index, pattern.final_end_index)
+
     if final_range is None:
         claim_branching_copies_before_return(decompiler, instructions, pattern)
         return
+
     for body_range in body_ranges:
         claim_finally_copies_before_return(
             decompiler, instructions, body_range, final_range, pattern.handler_index
@@ -384,10 +410,11 @@ def claim_finally_copies(
 def claim_branching_copies_before_return(
     decompiler: DecompilerContext,
     instructions: list[Instruction],
-    pattern: "OutOfLineTryPattern",
+    pattern: OutOfLineTryPattern,
 ) -> None:
     if pattern.handler_final_range is None:
         return
+
     start_index, end_index = pattern.handler_final_range
     length = end_index - start_index
     for index in range(pattern.body_start_index, pattern.body_end_index - length + 1):
@@ -420,7 +447,9 @@ def claim_finally_copies_before_return(
     length = final_end - final_start
     if length < 1:
         return
+
     protected = indexes_inside_handler(decompiler, instructions, handler_index)
+
     for index in range(body_range[0], body_range[1] - length):
         return_index = unprotected_return_end(
             instructions, index + length, body_range[1] + 1
@@ -464,6 +493,7 @@ def returns_constant(
     # only 3.12 and 3.13 have RETURN_CONST; the others load the constant first
     if decompiler.version is None or decompiler.version[:2] in {(3, 12), (3, 13)}:
         return False
+
     return (
         instructions[index].opname == "LOAD_CONST"
         and instructions[index + 1].opname == "RETURN_VALUE"
@@ -481,6 +511,7 @@ def claim_finally_copy(
         decompiler.code, instructions, make_offset_index(instructions)
     )
     regions = handler_regions(instructions, spans)
+
     for span in spans:
         handler_index = span.target_index
         if handler_index not in regions or handler_index < end_index:
@@ -491,8 +522,10 @@ def claim_finally_copy(
             if other.target_index == handler_index
         ):
             decompiler.claimed_ranges[handler_index] = regions[handler_index]
+
     while start_index > lower_bound and instructions[start_index - 1].opname == "NOP":
         start_index -= 1
+
     for index in range(start_index, end_index):
         decompiler.claimed_ranges[index] = end_index
         if instructions[index].opname != "NOP":
@@ -507,11 +540,13 @@ def translate_finally_block(
 ) -> list[ast.stmt]:
     if handler_range is None:
         return decompiler.translate_child_statements(instructions, *inline_range)
+
     start_index, end_index = handler_range
     for index in range(start_index, end_index):
         if is_reraise_zero(instructions[index]):
             decompiler.claimed_ranges[index] = index + 1
             decompiler.handler_exit_indexes.add(index)
+
     statements = decompiler.translate_child_statements(
         instructions, start_index, end_index
     )
@@ -560,11 +595,7 @@ def find_suppressed_finally_cleanup_handler(
     final_start_index: int,
     final_end_index: int,
 ) -> int | None:
-    table = bytes(getattr(code, "co_exceptiontable", b"") or b"")
-    if not table:
-        return None
-
-    for entry in parse_exception_table(table):
+    for entry in table_entries(code, instructions):
         start_index = offset_to_index.get(entry.start_offset)
         end_index = offset_to_index.get(entry.end_offset)
         handler_start_index = offset_to_index.get(entry.target_offset)
@@ -644,6 +675,7 @@ def read_exception_opcode_index(
     cursor = skip_exception_match_prefix(instructions, start_index, end_index)
     if cursor >= end_index or not predicate(instructions[cursor]):
         return None
+
     return cursor
 
 
@@ -656,13 +688,14 @@ def has_suppressed_exception_return_tail(
     start_index: int,
     end_index: int,
 ) -> bool:
-    required = (
+    required: tuple[ExceptionInstructionPredicate, ...] = (
         lambda instruction: instruction.opname == "POP_TOP",
         lambda instruction: instruction.opname == "POP_EXCEPT",
         is_none_load,
         lambda instruction: instruction.opname == "RETURN_VALUE",
     )
     cursor = start_index
+
     for predicate in required:
         opcode_index = read_exception_opcode_index(
             instructions,
@@ -672,7 +705,9 @@ def has_suppressed_exception_return_tail(
         )
         if opcode_index is None:
             return False
+
         cursor = opcode_index + 1
+
     return True
 
 
@@ -701,6 +736,7 @@ def try_translate_exception_table_except_finally(
 
     body: list[ast.stmt]
     handler_body: list[ast.stmt]
+
     if pattern.returns_protected_values:
         body = [
             ast.Return(
@@ -831,17 +867,15 @@ def try_translate_exception_table_except_star(
         )
         for handler in pattern.handlers
     ]
-    try_star = getattr(ast, "TryStar", None)
-    if try_star is None:
-        raise RuntimeError("exception groups require Python 3.11 or newer")
     decompiler.statements.append(
-        try_star(
+        ast.TryStar(
             body=body or [ast.Pass()],
             handlers=handlers,
             orelse=[],
             finalbody=[],
         )
     )
+
     if pattern.trailing_start_index is not None:
         decompiler.statements.extend(
             decompiler.translate_child_statements(
@@ -850,6 +884,7 @@ def try_translate_exception_table_except_star(
                 pattern.trailing_end_index or pattern.trailing_start_index,
             )
         )
+
     return pattern.after_index
 
 
@@ -874,14 +909,15 @@ def try_translate_except(
         pattern.handler_body_start_index,
         pattern.handler_body_end_index,
     )
-
     exception_type = None
+
     if pattern.exception_type_index >= 0:
         exception_type = decompiler.evaluate_expression_range(
             instructions,
             pattern.exception_type_index,
             pattern.exception_type_index + 1,
         )
+
     decompiler.statements.append(
         ast.Try(
             body=body or [ast.Pass()],
@@ -945,6 +981,7 @@ def find_exception_table_except_pattern(
     )
     render_body_end_index = region.body_end_index
     resume_index = after_index
+
     if success_jump_index is not None:
         render_body_end_index = success_jump_index
     elif is_exception_table_fallthrough_body(
@@ -969,6 +1006,7 @@ def find_exception_table_except_pattern(
     handler_body_end_index = handler.body_end_index
     trailing_start_index = None
     trailing_end_index = None
+
     if trailing is not None:
         handler_body_end_index -= trailing.length
         trailing_start_index = trailing.start_index
@@ -997,13 +1035,14 @@ def read_exception_table_region(
     end_index: int,
     use_protected_end: bool,
 ) -> ExceptionTableRegion | None:
-    entry = find_exception_table_entry(code, instructions[cursor].offset)
+    entries = table_entries(code, instructions)
+    entry = find_exception_table_entry(entries, instructions[cursor].offset)
     if entry is None:
         return None
 
     body_start_index = offset_to_index.get(entry.start_offset)
     body_end_index = read_exception_table_body_end_index(
-        code,
+        entries,
         offset_to_index,
         entry,
         end_index,
@@ -1030,7 +1069,7 @@ def read_exception_table_region(
 
 
 def read_exception_table_body_end_index(
-    code: object,
+    entries: tuple[ExceptionTableEntry, ...],
     offset_to_index: dict[int, int],
     entry: ExceptionTableEntry,
     end_index: int,
@@ -1038,11 +1077,12 @@ def read_exception_table_body_end_index(
 ) -> int | None:
     if use_protected_end:
         return exception_table_protected_end_index(
-            code,
+            entries,
             offset_to_index,
             entry,
             end_index,
         )
+
     return offset_to_index.get(entry.end_offset)
 
 
@@ -1053,9 +1093,11 @@ def is_exception_table_fallthrough_body(
 ) -> bool:
     if body_end_index >= handler_start_index:
         return False
+
     instruction = instructions[body_end_index]
     if is_jump_op(instruction.opname) or is_terminal_op(instruction.opname):
         return False
+
     return instruction.opname != "POP_EXCEPT"
 
 
@@ -1072,9 +1114,11 @@ def find_exception_table_success_jump_before_handler(
             int,
         ):
             continue
+
         target_index = offset_to_index.get(instruction.argval)
         if target_index is not None and target_index > handler_start_index:
             return index
+
     return None
 
 
@@ -1117,13 +1161,14 @@ def find_exception_table_finally_pattern(
     after_index = (
         cleanup_after_index if returns_protected_value else final_range.final_end_index
     )
-
     handler_final_range = None
+
     if final_range.handler_final_start_index is not None:
         handler_final_range = (
             final_range.handler_final_start_index,
             final_range.handler_final_end_index + 1,
         )
+
     return ExceptionTableFinallyPattern(
         body_start_index=region.body_start_index,
         body_end_index=region.body_end_index,
@@ -1150,6 +1195,7 @@ def read_exception_table_finally_body_range(
     )
     if several_ends is not None:
         return several_ends
+
     handler_final_end_index = find_reraise_zero(
         instructions,
         handler_final_start_index,
@@ -1213,11 +1259,13 @@ def read_branching_finally_range(
     )
     if cleanup_index is None:
         return None
+
     copy = instructions[start_index:cleanup_index]
     ends = [instruction for instruction in copy if is_reraise_zero(instruction)]
     nested = any(i.opname in {"PUSH_EXC_INFO", "CHECK_EXC_MATCH"} for i in copy)
     if len(ends) < 2 or nested or not is_reraise_zero(copy[-1]):
         return None
+
     final_end_index = inline_finally_end(
         instructions,
         inline_finally_start(instructions, body_end_index, start_index),
@@ -1226,6 +1274,7 @@ def read_branching_finally_range(
     )
     if final_end_index is None or final_end_index > handler_index:
         return None
+
     return FinallyBodyRange(
         final_start_index=body_end_index,
         final_end_index=final_end_index,
@@ -1257,8 +1306,10 @@ def inline_finally_end(
         if not is_reraise_zero(instruction):
             if instructions[inline_index].opname != instruction.opname:
                 return None
+
             inline_index += 1
             continue
+
         resumed = instructions[index + 1]
         while not (
             instructions[inline_index].is_jump_target
@@ -1270,6 +1321,7 @@ def inline_finally_end(
             inline_index += 1
             if inline_index >= handler_index:
                 return None
+
     return inline_index
 
 
@@ -1288,6 +1340,7 @@ def is_valid_finally_region_start(
         return False
     if region.handler_start_index >= end_index:
         return False
+
     return instructions[region.handler_start_index].opname == "PUSH_EXC_INFO"
 
 
@@ -1368,6 +1421,7 @@ def read_exception_table_except_finally_range(
     )
     if cleanup_range is None:
         return None
+
     cleanup_start_index, cleanup_end_index = cleanup_range
     if not same_instruction_range_behavior(
         instructions,
@@ -1423,8 +1477,8 @@ def read_returning_except_finally_range(
     )
     if trailing_range is None:
         return None
-    final_start_index, final_end_index = trailing_range
 
+    final_start_index, final_end_index = trailing_range
     handler_end_index = trim_saved_return_handler_cleanup(
         instructions,
         except_pattern.handler_body_start_index,
@@ -1488,8 +1542,8 @@ def has_duplicated_exception_finally_range(
     )
     if cleanup_range is None:
         return False
-    cleanup_start_index, cleanup_end_index = cleanup_range
 
+    cleanup_start_index, cleanup_end_index = cleanup_range
     return same_instruction_range_behavior(
         instructions,
         final_start_index,
@@ -1510,6 +1564,7 @@ def trim_saved_return_handler_cleanup(
         "SWAP",
     }:
         cursor -= 1
+
     return cursor
 
 
@@ -1524,6 +1579,7 @@ def skip_finally_body_prefix(
         "PUSH_EXC_INFO",
     }:
         cursor += 1
+
     return cursor
 
 
@@ -1535,6 +1591,7 @@ def find_finally_body_end_before_cleanup(
     for index in range(start_index, end_index):
         if is_terminal_op(instructions[index].opname):
             return index
+
     return None
 
 
@@ -1545,13 +1602,10 @@ def find_duplicated_exception_finally_range(
     handler_start_index: int,
     end_index: int,
 ) -> tuple[int, int] | None:
-    table = bytes(getattr(code, "co_exceptiontable", b"") or b"")
-    if not table:
-        return None
-
-    for entry in parse_exception_table(table):
+    for entry in table_entries(code, instructions):
         if entry.depth != 0:
             continue
+
         start_index = offset_to_index.get(entry.start_offset)
         target_index = offset_to_index.get(entry.target_offset)
         if start_index is None or target_index is None:
@@ -1560,6 +1614,7 @@ def find_duplicated_exception_finally_range(
             continue
         if target_index >= end_index:
             continue
+
         body_start_index = skip_finally_body_prefix(
             instructions,
             target_index,
@@ -1583,16 +1638,24 @@ def same_instruction_range_behavior(
     right_start_index: int,
     right_end_index: int,
 ) -> bool:
-    left_length = left_end_index - left_start_index
-    if left_length != right_end_index - right_start_index:
-        return False
+    length = left_end_index - left_start_index
+    return length == right_end_index - right_start_index and same_instruction_run(
+        instructions, left_start_index, right_start_index, length
+    )
 
-    for offset in range(left_length):
-        left = instructions[left_start_index + offset]
-        right = instructions[right_start_index + offset]
-        if not same_instruction_behavior(left, right):
-            return False
-    return True
+
+def same_instruction_run(
+    instructions: list[Instruction],
+    left_start: int,
+    right_start: int,
+    length: int,
+) -> bool:
+    return all(
+        same_instruction_behavior(
+            instructions[left_start + step], instructions[right_start + step]
+        )
+        for step in range(length)
+    )
 
 
 def has_terminal_instruction(
@@ -1603,6 +1666,7 @@ def has_terminal_instruction(
     for index in range(start_index, end_index):
         if is_terminal_op(instructions[index].opname):
             return True
+
     return False
 
 
@@ -1615,6 +1679,7 @@ def find_reraise_zero(
         instruction = instructions[index]
         if instruction.opname == "RERAISE" and int(instruction.arg or 0) == 0:
             return index
+
     return None
 
 
@@ -1627,6 +1692,7 @@ def find_finally_exception_cleanup_after(
         instruction = instructions[index]
         if instruction.opname == "RERAISE" and int(instruction.arg or 0) != 0:
             return index + 1
+
     return end_index
 
 
@@ -1637,6 +1703,7 @@ def is_return_after_finally(
 ) -> bool:
     if final_end_index >= handler_start_index:
         return False
+
     return instructions[final_end_index].opname == "RETURN_VALUE"
 
 
@@ -1683,8 +1750,8 @@ def find_exception_table_except_star_pattern(
     )
     if after_region is None:
         return None
-    after_index, trailing_start_index, trailing_end_index = after_region
 
+    after_index, trailing_start_index, trailing_end_index = after_region
     return ExceptionTableExceptStarPattern(
         body_start_index=region.body_start_index,
         body_end_index=exception_table_body_end_index(
@@ -1708,6 +1775,7 @@ def exception_table_body_end_index(
         return body_end_index
 
     instruction = instructions[body_end_index]
+
     if is_implicit_none_return(instructions, body_end_index):
         return body_end_index
     if is_terminal_op(instruction.opname):
@@ -1718,10 +1786,12 @@ def exception_table_body_end_index(
             body_end_index,
             handler_start_index,
         )
+
     if is_none_load(instruction) and body_end_index + 1 < handler_start_index:
         next_instruction = instructions[body_end_index + 1]
         if next_instruction.opname == "RETURN_VALUE":
             return body_end_index + 2
+
     return body_end_index
 
 
@@ -1737,10 +1807,12 @@ def exception_table_pop_except_body_end(
     next_instruction = instructions[next_index]
     if is_terminal_op(next_instruction.opname):
         return next_index + 1
+
     if is_none_load(next_instruction) and next_index + 1 < handler_start_index:
         return_instruction = instructions[next_index + 1]
         if return_instruction.opname == "RETURN_VALUE":
             return next_index + 2
+
     return body_end_index
 
 
@@ -1764,6 +1836,7 @@ def find_exception_table_common_trailing_body(
         return None
 
     handler_tail_start = handler_body_end_index - success_length
+
     for offset in range(success_length):
         success_instruction = instructions[success_start_index + offset]
         handler_instruction = instructions[handler_tail_start + offset]
@@ -1784,6 +1857,7 @@ def same_instruction_behavior(left: Instruction, right: Instruction) -> bool:
         return False
     if left.argrepr == right.argrepr and left.argval == right.argval:
         return True
+
     return (
         left.argrepr.startswith("to ")
         and right.argrepr.startswith("to ")
@@ -1794,6 +1868,7 @@ def same_instruction_behavior(left: Instruction, right: Instruction) -> bool:
 def common_trailing_opcode_name(opname: str) -> str:
     if opname == "LOAD_FAST_CHECK":
         return "LOAD_FAST"
+
     return opname
 
 
@@ -1812,6 +1887,7 @@ def is_implicit_none_return(
     next_index = start_index + 1
     if next_index >= len(instructions):
         return False
+
     next_instruction = instructions[next_index]
     return (
         next_instruction.opname == "RETURN_VALUE"
@@ -1820,34 +1896,29 @@ def is_implicit_none_return(
 
 
 def find_exception_table_entry(
-    code: object,
+    entries: tuple[ExceptionTableEntry, ...],
     start_offset: int,
 ) -> ExceptionTableEntry | None:
-    table = bytes(getattr(code, "co_exceptiontable", b"") or b"")
-    if not table:
-        return None
-
     match: ExceptionTableEntry | None = None
-    for entry in parse_exception_table(table):
+
+    for entry in entries:
         if entry.start_offset != start_offset:
             continue
         if match is None or entry.depth < match.depth:
             match = entry
+
     return match
 
 
 def exception_table_protected_end_index(
-    code: object,
+    entries: tuple[ExceptionTableEntry, ...],
     offset_to_index: dict[int, int],
     entry: ExceptionTableEntry,
     end_index: int,
 ) -> int | None:
-    table = bytes(getattr(code, "co_exceptiontable", b"") or b"")
-    if not table:
-        return offset_to_index.get(entry.end_offset)
-
     end_offset = entry.end_offset
-    for candidate in parse_exception_table(table):
+
+    for candidate in entries:
         if candidate.depth != entry.depth:
             continue
         if candidate.target_offset != entry.target_offset:
@@ -1856,11 +1927,13 @@ def exception_table_protected_end_index(
             continue
         if candidate.start_offset >= entry.target_offset:
             continue
+
         end_offset = max(end_offset, candidate.end_offset)
 
     end_index_value = offset_to_index.get(end_offset)
     if end_index_value is None or end_index_value > end_index:
         return None
+
     return end_index_value
 
 
@@ -1880,6 +1953,7 @@ def find_exception_table_after_index(
         target = offset_to_index.get(int(jump.argval))
         if target is None or target <= body_end_index or target > end_index:
             return None
+
         return target
 
     next_index = body_end_index + 1
@@ -1898,15 +1972,6 @@ def find_exception_table_after_index(
             if target is not None and target > next_index and target <= end_index:
                 return target
 
-    if is_terminal_op(jump.opname):
-        return find_exception_table_terminal_after_index(
-            code,
-            instructions,
-            offset_to_index,
-            entry,
-            body_end_index,
-            end_index,
-        )
     return find_exception_table_terminal_after_index(
         code,
         instructions,
@@ -1935,14 +2000,12 @@ def find_exception_table_terminal_after_index(
         if matched_after is not None:
             return matched_after
 
-    table = bytes(getattr(code, "co_exceptiontable", b"") or b"")
-    if not table:
-        return None
-
     cleanup_indices: list[int] = []
-    for item in parse_exception_table(table):
+
+    for item in table_entries(code, instructions):
         if item.depth < 1:
             continue
+
         target_index = offset_to_index.get(item.target_offset)
         if (
             target_index is None
@@ -1950,6 +2013,7 @@ def find_exception_table_terminal_after_index(
             or target_index >= end_index
         ):
             continue
+
         cleanup_indices.append(target_index)
 
     if not cleanup_indices:
@@ -1968,18 +2032,22 @@ def exception_handler_matched_after_index(
     end_index: int,
 ) -> int | None:
     miss_offset = exception_handler_miss_offset(instructions, cleanup_index, end_index)
+
     for index in range(cleanup_index, end_index):
         instruction = instructions[index]
         if instruction.opname == "JUMP_FORWARD" and isinstance(instruction.argval, int):
             if miss_offset is not None and instruction.argval <= miss_offset:
                 continue
+
             return next_index_at_or_after_offset(
                 instructions,
                 instruction.argval,
                 end_index,
             )
+
         if is_terminal_op(instruction.opname):
             return None
+
     return None
 
 
@@ -1995,9 +2063,11 @@ def exception_handler_miss_offset(
     jump_index = skip_exception_match_prefix(instructions, match_index + 1, end_index)
     if jump_index >= end_index:
         return None
+
     jump = instructions[jump_index]
     if "POP_JUMP" not in jump.opname or not isinstance(jump.argval, int):
         return None
+
     return jump.argval
 
 
@@ -2009,6 +2079,7 @@ def skip_exception_cleanup_tail(
     for index in range(cleanup_index, end_index):
         if is_terminal_op(instructions[index].opname):
             return index + 1
+
     return None
 
 
@@ -2020,6 +2091,7 @@ def next_index_at_or_after_offset(
     for index in range(end_index):
         if instructions[index].offset >= offset:
             return index
+
     return None
 
 
@@ -2082,7 +2154,9 @@ def read_exception_table_handler_match(
     match_index = find_check_exception_match(
         instructions, exception_type_index, after_index
     )
-    if match_index is None:
+    if match_index is None or not is_type_expression(
+        instructions, exception_type_index, match_index
+    ):
         return None
 
     miss_jump_index = skip_exception_match_prefix(
@@ -2103,6 +2177,16 @@ def read_exception_table_handler_match(
         exception_type_end_index=match_index,
         miss_jump_index=miss_jump_index,
         miss_index=miss_index,
+    )
+
+
+def is_type_expression(instructions: list[Instruction], start: int, end: int) -> bool:
+    return not any(
+        "JUMP" in item.opname
+        or item.opname.startswith(("STORE_", "DELETE_"))
+        or item.opname
+        in {"PUSH_EXC_INFO", "POP_EXCEPT", "RERAISE", "RETURN_VALUE", "POP_TOP"}
+        for item in instructions[start:end]
     )
 
 
@@ -2127,6 +2211,7 @@ def read_exception_handler_miss_index(
         or miss_index > after_index
     ):
         return None
+
     return miss_index
 
 
@@ -2146,11 +2231,13 @@ def exception_handler_name(
 ) -> str | None:
     if body_start_index >= miss_index:
         return None
+
     instruction = instructions[body_start_index]
     if instruction.opname not in EXCEPTION_NAME_STORES:
         return None
     if not isinstance(instruction.argval, str):
         return None
+
     return instruction.argval
 
 
@@ -2162,6 +2249,7 @@ def find_check_exception_match(
     for index in range(start_index, end_index):
         if instructions[index].opname == "CHECK_EXC_MATCH":
             return index
+
     return None
 
 
@@ -2181,7 +2269,6 @@ def find_exception_table_handler_body_end(
     )
     if success_cleanup_index is not None:
         return success_cleanup_index
-
     if name is None:
         return miss_index
 
@@ -2197,9 +2284,11 @@ def find_exception_table_handler_body_end(
     for index in range(body_start_index, miss_index):
         if is_terminal_op(instructions[index].opname):
             return index + 1
+
     cursor = miss_index - 1
     while cursor >= body_start_index and instructions[cursor].opname == "POP_EXCEPT":
         cursor -= 1
+
     return cursor + 1
 
 
@@ -2225,6 +2314,7 @@ def find_named_exception_cleanup_end(
     )
     if returning_end_index is not None:
         return returning_end_index
+
     return cleanup_index
 
 
@@ -2234,14 +2324,17 @@ def find_exception_handler_success_cleanup(
     miss_index: int,
 ) -> int | None:
     cleanup_index = None
+
     for index in range(body_start_index, miss_index):
         if instructions[index].opname != "POP_EXCEPT":
             continue
+
         jump_index = skip_extended_args(instructions, index + 1, miss_index)
         if jump_index >= miss_index:
             continue
         if is_jump_op(instructions[jump_index].opname):
             cleanup_index = index
+
     return cleanup_index
 
 
@@ -2252,6 +2345,7 @@ def skip_extended_args(
 ) -> int:
     while cursor < end_index and instructions[cursor].opname == "EXTENDED_ARG":
         cursor += 1
+
     return cursor
 
 
@@ -2319,6 +2413,7 @@ def read_exception_group_handlers(
 def exception_group_next_handler_cursor(handler: SimpleHandler) -> int:
     if handler.miss_index is not None:
         return handler.miss_index
+
     return handler.body_end_index
 
 
@@ -2328,6 +2423,7 @@ def find_next_exception_group_type_start(
     end_index: int,
 ) -> int | None:
     cursor = start_index
+
     for _index in range(64):
         cursor = skip_exception_match_prefix(instructions, cursor, end_index)
         if cursor >= end_index:
@@ -2338,7 +2434,9 @@ def find_next_exception_group_type_start(
             return None
         if instruction.opname == "POP_TOP":
             return skip_exception_match_prefix(instructions, cursor + 1, end_index)
+
         cursor += 1
+
     return None
 
 
@@ -2416,11 +2514,14 @@ def read_exception_group_type_start(
     end_index: int,
 ) -> int | None:
     cursor = skip_exception_match_prefix(instructions, start_index, end_index)
+
     for opname in ("COPY", "BUILD_LIST", "COPY", "SWAP"):
         if cursor < end_index and instructions[cursor].opname == opname:
             cursor = skip_exception_match_prefix(instructions, cursor + 1, end_index)
+
     if cursor >= end_index:
         return None
+
     return cursor
 
 
@@ -2432,6 +2533,7 @@ def find_check_exception_group_match(
     for index in range(start_index, end_index):
         if instructions[index].opname == "CHECK_EG_MATCH":
             return index
+
     return None
 
 
@@ -2455,8 +2557,9 @@ def find_exception_group_handler_body_end(
             return cleanup_index
 
     for index in range(body_start_index, miss_index):
-        if instructions[index].opname in {"JUMP", "JUMP_FORWARD"}:
+        if instructions[index].opname in FORWARD_JUMPS:
             return index
+
     return miss_index
 
 
@@ -2469,14 +2572,17 @@ def find_named_exception_cleanup(
     for index in range(body_start_index, miss_index - 2):
         if not is_none_load(instructions[index]):
             continue
+
         store = instructions[index + 1]
         delete = instructions[index + 2]
+
         if store.opname not in EXCEPTION_NAME_STORES:
             continue
         if delete.opname not in EXCEPTION_NAME_DELETES:
             continue
         if store.argval == name and delete.argval == name:
             return index
+
     return None
 
 
@@ -2492,6 +2598,7 @@ def named_exception_cleanup_return_end(
             return index + 1
         if instructions[index].opname in {"RERAISE", "RAISE_VARARGS"}:
             return None
+
     return None
 
 
@@ -2508,14 +2615,18 @@ def remove_named_exception_cleanup(
         if is_named_exception_cleanup_statement_pair(body, cursor, name):
             cursor += 2
             continue
+
         statement = body[cursor]
         if isinstance(statement, ast.If):
             statement.body = remove_named_exception_cleanup(statement.body, name)
             statement.orelse = remove_named_exception_cleanup(statement.orelse, name)
+
         if isinstance(statement, ast.Try):
             statement.body = remove_named_exception_cleanup(statement.body, name)
+
         cleaned.append(statement)
         cursor += 1
+
     return cleaned
 
 
@@ -2526,6 +2637,7 @@ def is_named_exception_cleanup_statement_pair(
 ) -> bool:
     if index + 1 >= len(body):
         return False
+
     return is_named_exception_none_assignment(
         body[index],
         name,
@@ -2537,9 +2649,11 @@ def is_named_exception_none_assignment(statement: ast.stmt, name: str) -> bool:
         return False
     if len(statement.targets) != 1:
         return False
+
     target = statement.targets[0]
     if not isinstance(target, ast.Name) or target.id != name:
         return False
+
     return isinstance(statement.value, ast.Constant) and statement.value.value is None
 
 
@@ -2548,14 +2662,9 @@ def is_named_exception_delete(statement: ast.stmt, name: str) -> bool:
         return False
     if len(statement.targets) != 1:
         return False
+
     target = statement.targets[0]
     return isinstance(target, ast.Name) and target.id == name
-
-
-def is_none_load(instruction: Instruction) -> bool:
-    return instruction.opname in {"LOAD_CONST", "RETURN_CONST"} and (
-        instruction.argval is None
-    )
 
 
 def find_exception_group_after_region(
@@ -2570,6 +2679,7 @@ def find_exception_group_after_region(
     )
     if cursor is None:
         return None
+
     cursor = skip_exception_match_prefix(instructions, cursor, end_index)
     if cursor < end_index and instructions[cursor].opname == "COPY":
         cursor = skip_exception_match_prefix(instructions, cursor + 1, end_index)
@@ -2586,6 +2696,7 @@ def find_exception_group_after_region(
     cursor = skip_exception_match_prefix(instructions, jump_index + 1, end_index)
     if cursor < end_index and instructions[cursor].opname == "POP_TOP":
         cursor = skip_exception_match_prefix(instructions, cursor + 1, end_index)
+
     return read_exception_group_after_tail(instructions, cursor, end_index)
 
 
@@ -2595,18 +2706,24 @@ def find_exception_group_reraise_star_end(
     end_index: int,
 ) -> int | None:
     cursor = start_index
+
     for _index in range(32):
         cursor = skip_exception_match_prefix(instructions, cursor, end_index)
         if cursor >= end_index:
             return None
+
         instruction = instructions[cursor]
         if instruction.opname == "PREP_RERAISE_STAR":
             return cursor + 1
+
         if instruction.opname == "CALL_INTRINSIC_2":
             if instruction.argrepr != "INTRINSIC_PREP_RERAISE_STAR":
                 return None
+
             return cursor + 1
+
         cursor += 1
+
     return None
 
 
@@ -2621,8 +2738,8 @@ def read_exception_group_after_tail(
 ) -> tuple[int, int | None, int | None] | None:
     if cursor >= end_index or instructions[cursor].opname != "POP_EXCEPT":
         return None
-    cursor += 1
 
+    cursor += 1
     trailing_end_index = terminal_tail_end_index(
         instructions,
         cursor,
@@ -2630,6 +2747,7 @@ def read_exception_group_after_tail(
     )
     if trailing_end_index is None:
         return cursor, None, None
+
     return (
         find_exception_group_cleanup_end(
             instructions,
@@ -2647,9 +2765,11 @@ def find_exception_group_cleanup_end(
     end_index: int,
 ) -> int:
     cleanup_end = start_index
+
     for index in range(start_index, end_index):
         if is_terminal_op(instructions[index].opname):
             cleanup_end = index + 1
+
     return cleanup_end
 
 
@@ -2745,8 +2865,8 @@ def read_legacy_try_except_shape(
     )
     if body_jump is None:
         return None
-    body_jump_index, after_offset = body_jump
 
+    body_jump_index, after_offset = body_jump
     after_index = jump_target_index_or_end(
         instructions,
         offset_to_index,
@@ -2776,9 +2896,11 @@ def read_legacy_try_except_body_jump(
     body_jump_index = handler_start_index - 1
     if body_jump_index <= setup_index:
         return None
+
     body_jump = instructions[body_jump_index]
     if body_jump.opname not in {"JUMP_FORWARD", "JUMP_ABSOLUTE", "JUMP"}:
         return None
+
     return body_jump_index, int(body_jump.argval)
 
 
@@ -2825,6 +2947,7 @@ def jump_target_index_or_end(
         return target_index
     if instructions and target_offset > instructions[-1].offset:
         return len(instructions)
+
     return None
 
 
@@ -2891,8 +3014,8 @@ def read_legacy_exception_match_handler(
     )
     if handler_body is None:
         return None
-    body_start_index, body_end_index, name = handler_body
 
+    body_start_index, body_end_index, name = handler_body
     return SimpleHandler(
         exception_type_index=match.exception_type_index,
         exception_type_end_index=match.exception_type_index + 1,
@@ -2911,6 +3034,7 @@ def read_legacy_jump_if_not_exception_match_handler(
 ) -> SimpleHandler | None:
     if instructions[handler_start_index].opname != "DUP_TOP":
         return None
+
     exception_type_index = handler_start_index + 1
     compare_index = skip_exception_match_prefix(
         instructions,
@@ -2940,6 +3064,7 @@ def read_legacy_exception_match(
 ) -> LegacyExceptionMatch | None:
     if instructions[handler_start_index].opname != "DUP_TOP":
         return None
+
     exception_type_index = handler_start_index + 1
     compare_index = skip_exception_match_prefix(
         instructions,
@@ -2956,6 +3081,7 @@ def read_legacy_exception_match(
     )
     if miss_jump_index >= after_index:
         return None
+
     miss_jump = instructions[miss_jump_index]
     if "IF_FALSE" not in miss_jump.opname and "IF_TRUE" not in miss_jump.opname:
         return None
@@ -2978,6 +3104,7 @@ def is_legacy_compare_exception_match(
 ) -> bool:
     if compare_index >= after_index:
         return False
+
     instruction = instructions[compare_index]
     return instruction.opname == "COMPARE_OP" and instruction.argrepr == (
         "exception-match"
@@ -3005,6 +3132,7 @@ def read_named_handler_body(
     )
     if body_end_index is None:
         return None
+
     return body_start_index, body_end_index, name
 
 
@@ -3052,6 +3180,7 @@ def read_bare_handler(
 ) -> SimpleHandler | None:
     if handler_start_index + 2 >= after_index:
         return None
+
     for index in range(handler_start_index, handler_start_index + 3):
         if instructions[index].opname != "POP_TOP":
             return None
@@ -3085,9 +3214,9 @@ def skip_exception_match_prefix(
         "CACHE",
         "EXTENDED_ARG",
         "NOP",
-        "SET_LINENO",
     }:
         cursor += 1
+
     return cursor
 
 
@@ -3102,6 +3231,7 @@ def skip_exception_stack_pops(
         "POP_TOP",
     }:
         cursor += 1
+
     return cursor
 
 
@@ -3114,14 +3244,17 @@ def find_handler_body_end(
 ) -> int | None:
     if after_offset is None and after_index < len(instructions):
         after_offset = instructions[after_index].offset
+
     for index in range(body_start_index, miss_index):
         instruction = instructions[index]
         if instruction.opname not in {"JUMP_FORWARD", "JUMP_ABSOLUTE", "JUMP"}:
             continue
         if instruction.argval == after_offset:
             return index
+
     if miss_index > body_start_index:
         return miss_index
+
     return None
 
 
@@ -3130,9 +3263,16 @@ def find_finally_body_end(
     start_index: int,
     final_start_index: int,
 ) -> int | None:
+    last = instructions[final_start_index - 1]
+    if last.opname == "RETURN_VALUE" and instructions[final_start_index - 2].opname == (
+        "CALL_FINALLY"
+    ):
+        return final_start_index
+
     for index in range(final_start_index - 1, start_index - 1, -1):
         if instructions[index].opname == "POP_BLOCK":
             return index
+
     return final_start_index
 
 
@@ -3144,6 +3284,7 @@ def find_end_finally(
     for index in range(start_index, end_index):
         if instructions[index].opname == "END_FINALLY":
             return index
+
     return None
 
 
@@ -3236,6 +3377,10 @@ def try_translate_out_of_line_try(
         pattern.body_end_index,
         pattern.else_end_index,
     )
+    else_leave = else_clause_leave(decompiler, instructions, pattern)
+    if else_leave is not None and not orelse:
+        orelse = [else_leave[1]]
+
     if pattern.final_end_index is not None:
         final_body = translate_finally_block(
             decompiler,
@@ -3246,20 +3391,24 @@ def try_translate_out_of_line_try(
             ),
             pattern.handler_final_range,
         )
+
         if pattern.final_after_index is not None:
             final_body = without_closing_returns(final_body)
+
         decompiler.statements.append(make_try_finally(body, final_body))
         return finally_after_index(instructions, pattern)
 
     break_end = break_closing_try_body(decompiler, instructions, pattern, end_index)
     if break_end is not None:
         body.append(ast.Break())
-    make_try = getattr(ast, "TryStar", ast.Try) if pattern.is_star else ast.Try
+
+    make_try = ast.TryStar if pattern.is_star else ast.Try
     if pattern.is_star and make_try is ast.Try:
         decompiler.warnings.append(
             "except* cannot be written by this Python (needs 3.11); "
             "the clauses are written as plain except"
         )
+
     decompiler.statements.append(
         make_try(
             body=body or [ast.Pass()],
@@ -3269,11 +3418,59 @@ def try_translate_out_of_line_try(
         )
     )
     append_statement_behind_clause(decompiler, instructions, pattern)
+
+    if else_leave is not None:
+        return else_leave[0] + 1
+
     return (
         break_end
         or end_behind_closing_jump(decompiler, instructions, pattern, end_index)
         or end_behind_inline_handler(instructions, pattern)
     )
+
+
+def else_clause_leave(
+    decompiler: DecompilerContext,
+    instructions: list[Instruction],
+    pattern: OutOfLineTryPattern,
+) -> tuple[int, ast.stmt] | None:
+    if pattern.else_end_index != pattern.body_end_index:
+        return None
+
+    return leaving_jump_behind_body(
+        decompiler,
+        instructions,
+        pattern.body_end_index,
+        min(len(instructions), pattern.handler_index),
+    )
+
+
+def leaving_jump_behind_body(
+    decompiler: DecompilerContext,
+    instructions: list[Instruction],
+    body_end_index: int,
+    limit: int,
+) -> tuple[int, ast.stmt] | None:
+    index = body_end_index
+    while index < limit and instructions[index].opname == "NOP":
+        index += 1
+
+    if index >= limit:
+        return None
+
+    jump = instructions[index]
+    if jump.starts_line is None or jump.opname not in {"JUMP_FORWARD", "JUMP_BACKWARD"}:
+        return None
+
+    body_line = line_in_effect(instructions, body_end_index - 1)
+    if body_line is not None and jump.starts_line <= body_line:
+        return None
+    if jump.argval in decompiler.loop_break_offsets:
+        return index, ast.Break()
+    if jump.argval in decompiler.loop_continue_offsets:
+        return index, ast.Continue()
+
+    return None
 
 
 def end_behind_closing_jump(
@@ -3286,11 +3483,13 @@ def end_behind_closing_jump(
         return None
     if pattern.else_end_index + 1 != pattern.handler_index:
         return None
+
     jump = instructions[pattern.else_end_index]
     if jump.opname != "JUMP_BACKWARD":
         return None
     if jump.argval not in decompiler.loop_continue_offsets:
         return None
+
     return end_index
 
 
@@ -3299,6 +3498,7 @@ def end_behind_inline_handler(
     pattern: OutOfLineTryPattern,
 ) -> int:
     jump = instructions[pattern.else_end_index]
+
     if pattern.else_end_index + 1 != pattern.handler_index or (
         pattern.else_end_index == pattern.body_end_index
     ):
@@ -3308,6 +3508,7 @@ def end_behind_inline_handler(
         or jump.argval != instructions[pattern.handler_end_index].offset
     ):
         return pattern.else_end_index
+
     return pattern.handler_end_index
 
 
@@ -3318,6 +3519,7 @@ def handler_break_target(
 ) -> int | None:
     if index + 2 >= end_index:
         return None
+
     pop, leave, jump = instructions[index : index + 3]
     if pop.opname != "POP_TOP" or pop.starts_line is None:
         return None
@@ -3325,6 +3527,7 @@ def handler_break_target(
         return None
     if jump.opname not in {"JUMP_FORWARD", "JUMP_BACKWARD"}:
         return None
+
     return int(jump.argval)
 
 
@@ -3333,20 +3536,39 @@ def handler_break_return_end(
     index: int,
     end_index: int,
 ) -> int | None:
-    if index + 3 >= end_index:
+    # a break whose loop exit was copied into the handler
+    tail_start = break_cleanup_end(instructions, index, end_index)
+    if tail_start is None or instructions[index].starts_line is None:
         return None
-    pop, leave, first = instructions[index : index + 3]
-    if pop.opname != "POP_TOP" or pop.starts_line is None:
+    if instructions[tail_start].starts_line is None:
         return None
-    if leave.opname != "POP_EXCEPT" or first.starts_line is None:
-        return None
-    for cursor in range(index + 2, end_index):
+
+    for cursor in range(tail_start, end_index):
         opname = instructions[cursor].opname
         if opname == "RETURN_VALUE":
             return cursor + 1
         if "JUMP" in opname or opname in {"FOR_ITER", "POP_TOP", "RETURN_CONST"}:
             return None
+
     return None
+
+
+def break_cleanup_end(
+    instructions: list[Instruction], index: int, end_index: int
+) -> int | None:
+    # one POP_TOP, two from 3.15
+    cursor = index
+    while cursor < end_index and cursor - index < 3:
+        if instructions[cursor].opname not in {"POP_TOP", "POP_EXCEPT"}:
+            break
+
+        cursor += 1
+
+    names = [item.opname for item in instructions[index:cursor]]
+    if names.count("POP_EXCEPT") != 1 or cursor + 1 >= end_index:
+        return None
+
+    return cursor
 
 
 def while_handler_break_target(
@@ -3356,11 +3578,13 @@ def while_handler_break_target(
 ) -> int | None:
     if index + 1 >= end_index:
         return None
+
     leave, jump = instructions[index : index + 2]
     if leave.opname != "POP_EXCEPT" or leave.starts_line is None:
         return None
     if jump.opname not in {"JUMP_FORWARD", "JUMP_BACKWARD"}:
         return None
+
     return int(jump.argval)
 
 
@@ -3377,14 +3601,17 @@ def break_closing_try_body(
         return None
     if is_backward_break_314(decompiler, instructions[index]):
         return index + 1
+
     copied_return_end = handler_break_return_end(instructions, index, end_index)
     if copied_return_end is not None:
         return copied_return_end
+
     target = handler_break_target(instructions, index, end_index)
     if target is None:
         return plain_break_end(decompiler, instructions, index)
     if target in decompiler.loop_continue_offsets | decompiler.detached_resume_offsets:
         return None
+
     return index + 3
 
 
@@ -3395,21 +3622,22 @@ def plain_break_end(
 ) -> int | None:
     if instructions[index].opname != "POP_TOP":
         return None
+
     jump = instructions[index + 1]
     if (
         jump.opname != "JUMP_FORWARD"
         or jump.argval not in decompiler.loop_break_offsets
     ):
         return None
+
     return index + 2
 
 
 def is_backward_break_314(decompiler: DecompilerContext, jump: Instruction) -> bool:
-    # python 3.14: a break of a loop that ends the body of another loop
-    # jumps back to where that loop goes on. at the end of a try body it is
-    # not the jump over the handlers, which would go forward
+    # 3.14: a break ending an inner loop jumps back to the outer loop
     if decompiler.version is None or decompiler.version < (3, 14):
         return False
+
     return (
         jump.opname == "JUMP_BACKWARD"
         and jump.argval in decompiler.loop_break_offsets
@@ -3426,6 +3654,9 @@ def append_statement_behind_clause(
         resume_index = clause.resume_index
         if resume_index is None or resume_index <= pattern.handler_index:
             continue
+        if resumes_into_copied_break(decompiler, instructions, resume_index):
+            continue
+
         tail_end = terminal_tail_end_index(
             instructions, resume_index, pattern.handler_end_index
         )
@@ -3435,6 +3666,7 @@ def append_statement_behind_clause(
                     instructions, resume_index, tail_end
                 )
             )
+
         return
 
 
@@ -3446,6 +3678,7 @@ def finally_after_index(
         return pattern.final_after_index
     if pattern.final_start_index is not None:
         return pattern.body_end_index
+
     final_end_index = pattern.final_end_index or pattern.body_end_index
     return_index = final_end_index
     while (
@@ -3453,8 +3686,10 @@ def finally_after_index(
         and instructions[return_index + 1].opname == "POP_TOP"
     ):
         return_index += 2
+
     if is_return_after_finally(instructions, return_index, pattern.handler_index):
         return return_index + 1
+
     return final_end_index
 
 
@@ -3467,6 +3702,7 @@ def claim_try_body_exits(
     after_index = pattern.body_end_index
     while instructions[after_index].opname == "NOP":
         after_index += 1
+
     spans = sorted(
         (span.start_index, span.end_index)
         for span in read_table_spans(decompiler.code, instructions, offset_to_index)
@@ -3480,6 +3716,7 @@ def claim_try_body_exits(
             instructions
         ):
             continue
+
         if same_instruction_range_behavior(
             instructions, hole_start, hole_end, after_index, after_index + length
         ):
@@ -3506,14 +3743,18 @@ def translate_guarded_statements(
 ) -> list[ast.stmt]:
     child = decompiler.make_child()
     child.active_handlers = decompiler.active_handlers | {handler_index}
+
     if break_index is not None:
         child.loop_break_offsets = decompiler.loop_break_offsets | {
             int(instructions[break_index].offset)
         }
+
     statements = child.translate_range(instructions, start_index, end_index)
+
     if len(child.stack) > len(decompiler.stack):
         value = child.expression_from_stack_value(child.stack[-1])
         statements.append(ast.Return(value=value))
+
     return statements
 
 
@@ -3525,6 +3766,7 @@ def closes_loop_body(
 ) -> bool:
     if pattern.else_end_index < end_index or end_index >= len(instructions):
         return False
+
     jump = instructions[end_index]
     return (
         jump.opname == "JUMP_BACKWARD"
@@ -3541,12 +3783,14 @@ def make_out_of_line_handler(
     after_index: int,
 ) -> ast.ExceptHandler:
     exception_type = None
+
     if clause.type_start_index is not None:
         exception_type = decompiler.evaluate_expression_range(
             instructions,
             clause.type_start_index,
             clause.type_end_index,
         )
+
     claim_handler_exits(decompiler, instructions, clause, after_index)
     falls_out_to_continue = ends_loop_body and any(
         index in decompiler.handler_exit_indexes
@@ -3562,6 +3806,7 @@ def make_out_of_line_handler(
     loop_exit = handler_loop_exit(decompiler, instructions, clause)
     if loop_exit is not None and not is_star and not falls_out_to_continue:
         body.append(loop_exit)
+
     return ast.ExceptHandler(
         type=exception_type,
         name=clause.name,
@@ -3584,17 +3829,23 @@ def is_handler_exit_marker(statement: ast.stmt) -> bool:
 
 def restore_handler_exits(statements: list[ast.stmt]) -> list[ast.stmt]:
     restored: list[ast.stmt] = []
+
     for statement in statements:
         if is_handler_exit_marker(statement):
             restored.extend(getattr(statement, HANDLER_EXIT_MARK))
             continue
+
         for field in ("body", "orelse", "finalbody"):
             nested = getattr(statement, field, None)
             if isinstance(nested, list) and nested:
-                setattr(statement, field, restore_handler_exits(nested) or [ast.Pass()])
+                block = cast("list[ast.stmt]", nested)
+                setattr(statement, field, restore_handler_exits(block) or [ast.Pass()])
+
         for handler in getattr(statement, "handlers", []):
             handler.body = restore_handler_exits(handler.body) or [ast.Pass()]
+
         restored.append(statement)
+
     return restored
 
 
@@ -3607,9 +3858,11 @@ def claim_handler_exits(
     for index in range(clause.body_start_index, clause.body_end_index):
         if instructions[index].opname != "POP_EXCEPT":
             continue
+
         exit_end = exit_to_statement_end(instructions, clause, index + 1, after_index)
         if exit_end is None and clause.name is None:
             exit_end = handler_exit_end(instructions, clause, index + 1)
+
         if exit_end is not None:
             decompiler.claimed_ranges[index] = exit_end
             decompiler.handler_exit_indexes.add(index)
@@ -3623,6 +3876,7 @@ def exit_to_statement_end(
 ) -> int | None:
     if clause.exit_jump_index is not None or clause.resume_index is not None:
         return None
+
     if clause.name is not None:
         if (
             find_named_exception_cleanup(
@@ -3631,12 +3885,15 @@ def exit_to_statement_end(
             != start_index
         ):
             return None
+
         start_index += 3
+
     jump = instructions[start_index]
     if jump.opname not in HANDLER_EXIT_JUMPS or after_index >= len(instructions):
         return None
     if jump.argval != instructions[after_index].offset:
         return None
+
     return start_index + 1
 
 
@@ -3650,14 +3907,18 @@ def handler_exit_end(
         same_target = jump.argval == instructions[clause.exit_jump_index].argval
         if jump.opname in HANDLER_EXIT_JUMPS and same_target:
             return start_index + 1
+
         return None
+
     if clause.resume_index is None:
         return None
+
     tail_end = terminal_tail_end_index(
         instructions, clause.resume_index, len(instructions)
     )
     if tail_end is None:
         return None
+
     length = tail_end - clause.resume_index
     if same_instruction_range_behavior(
         instructions,
@@ -3667,24 +3928,43 @@ def handler_exit_end(
         tail_end,
     ):
         return start_index + length
+
     return None
 
 
 def fold_handler_exits(statements: list[ast.stmt]) -> list[ast.stmt]:
     folded: list[ast.stmt] = []
+
     for index, statement in enumerate(statements):
         if is_handler_exit_marker(statement):
+            # a continue or break leaves elsewhere; other exit code copies what follows
+            folded.extend(loop_exit_of(statement))
             break
+
         folded.append(statement)
+
         if not isinstance(statement, ast.If):
             continue
-        leaves = bool(statement.body) and is_handler_exit_marker(statement.body[-1])
+
+        leaves = any(
+            is_handler_exit_marker(item) and not loop_exit_of(item)
+            for item in statement.body
+        )
         statement.body = fold_handler_exits(statement.body) or [ast.Pass()]
         statement.orelse = fold_else_handler_exit(statement.orelse)
         if leaves and not statement.orelse:
             statement.orelse = fold_handler_exits(statements[index + 1 :])
             break
+
     return folded
+
+
+def loop_exit_of(marker: ast.stmt) -> list[ast.stmt]:
+    code = getattr(marker, HANDLER_EXIT_MARK)
+    if len(code) == 1 and isinstance(code[0], (ast.Continue, ast.Break)):
+        return list(code)
+
+    return []
 
 
 def fold_else_handler_exit(statements: list[ast.stmt]) -> list[ast.stmt]:
@@ -3692,6 +3972,7 @@ def fold_else_handler_exit(statements: list[ast.stmt]) -> list[ast.stmt]:
         exit_code = getattr(statements[-1], HANDLER_EXIT_MARK)
         if exit_code:
             return [*fold_handler_exits(statements[:-1]), *exit_code]
+
     return fold_handler_exits(statements)
 
 
@@ -3705,12 +3986,15 @@ def handler_loop_exit(
             instructions, clause
         ):
             return ast.Break()
+
         return handler_copied_break(decompiler, instructions, clause)
+
     target = instructions[clause.exit_jump_index].argval
     if target in decompiler.loop_continue_offsets:
         return ast.Continue()
     if target in decompiler.loop_break_offsets:
         return ast.Break()
+
     return None
 
 
@@ -3721,10 +4005,13 @@ def clause_returns_none(
     cursor = clause.body_end_index
     if instructions[cursor].opname != "POP_EXCEPT":
         return False
+
     while instructions[cursor].opname == "POP_EXCEPT":
         cursor += 1
+
     if clause.name is not None:
         cursor += 3
+
     last = instructions[cursor]
     return last.opname == "RETURN_CONST" and last.argval is None
 
@@ -3739,6 +4026,8 @@ def handler_copied_break(
         return None
     if instructions[resume_index].offset in decompiler.loop_break_offsets:
         return ast.Break()
+    if resumes_into_copied_break(decompiler, instructions, resume_index):
+        return ast.Break()
     if (
         0 < resume_index < len(instructions) - 1
         and instructions[resume_index].opname == "POP_TOP"
@@ -3749,7 +4038,29 @@ def handler_copied_break(
         and instructions[resume_index + 1].offset in decompiler.loop_break_offsets
     ):
         return ast.Break()
+
     return None
+
+
+def resumes_into_copied_break(
+    decompiler: DecompilerContext,
+    instructions: list[Instruction],
+    resume_index: int,
+) -> bool:
+    end = terminal_tail_end_index(instructions, resume_index, len(instructions))
+    if end is None:
+        return False
+
+    offsets = make_offset_index(instructions)
+    length = end - resume_index
+    return any(
+        start != resume_index
+        and same_instruction_range_behavior(
+            instructions, resume_index, end, start, start + length
+        )
+        for start in (offsets.get(offset) for offset in decompiler.loop_break_offsets)
+        if start is not None and start + length <= len(instructions)
+    )
 
 
 def find_try_handler(
@@ -3767,6 +4078,7 @@ def find_try_handler(
             end_index,
             decompiler.active_handlers,
         )
+
     return find_handler_of_empty_try(
         instructions, spans, cursor, decompiler.active_handlers
     )
@@ -3783,15 +4095,16 @@ def find_out_of_line_try_pattern(
     found = find_try_handler(decompiler, instructions, spans, cursor, end_index)
     if found is None:
         return None
+
     handler_index, body_end_index = found
     cleanup_index = handler_cleanup_index(instructions, spans, handler_index)
     if cleanup_index is None:
         return None
+
     body_end_index = unprotected_return_end(instructions, body_end_index, end_index)
     body_end_index = unprotected_branch_end(
         instructions, offset_to_index, cursor, body_end_index, end_index
     )
-
     clauses = read_out_of_line_clauses(
         instructions,
         offset_to_index,
@@ -3808,7 +4121,9 @@ def find_out_of_line_try_pattern(
             clause_with_own_return(decompiler, instructions, clause)
             for clause in clauses
         )
+
     is_star = False
+
     if not clauses:
         clauses = read_out_of_line_star_clauses(
             instructions,
@@ -3818,6 +4133,7 @@ def find_out_of_line_try_pattern(
             body_end_index,
         )
         is_star = bool(clauses)
+
     if not clauses:
         final = find_out_of_line_finally_pattern(
             instructions,
@@ -3841,6 +4157,7 @@ def find_out_of_line_try_pattern(
     )
     if else_end_index is None:
         return None
+
     else_end_index = else_end_before_handler(
         instructions,
         clauses,
@@ -3856,6 +4173,7 @@ def find_out_of_line_try_pattern(
         (body_end_index, else_end_index),
         (handler_index, cleanup_index + 3, end_index),
     )
+
     if decompiler.version is not None and decompiler.version < (3, 13):
         else_end_index = else_end_by_numbering(
             decompiler.code,
@@ -3866,13 +4184,15 @@ def find_out_of_line_try_pattern(
     elif decompiler.version is not None and decompiler.version >= (3, 14):
         else_end_index = else_end_by_borrowed_loads(
             instructions,
-            (body_end_index, else_end_index, handler_index),
+            (body_end_index, else_end_index, handler_index, end_index),
             all(clause_leaves_on_its_own(clause) for clause in clauses),
         )
+
     if not is_star:
         clauses = with_unshared_returns(
             decompiler, instructions, clauses, handler_index, else_end_index
         )
+
     return OutOfLineTryPattern(
         handler_index=handler_index,
         handler_end_index=cleanup_index + 3,
@@ -3892,11 +4212,13 @@ def with_inline_handlers_of_final_block(
 ) -> OutOfLineTryPattern | None:
     if pattern is None or not stands_in_line(decompiler):
         return pattern
+
     end_index = pattern.final_end_index
     if end_index is None or pattern.final_start_index is not None:
         return pattern
     if instructions[end_index].opname != "JUMP_FORWARD":
         return pattern
+
     regions = handler_regions(instructions, spans)
     inside = range(pattern.body_end_index, end_index)
     index = end_index + 1
@@ -3908,12 +4230,14 @@ def with_inline_handlers_of_final_block(
         )
     ):
         index = regions[index]
+
     if index == end_index + 1:
         return pattern
     if instructions[index].opname == "JUMP_FORWARD":
         index += 1
     if index != pattern.handler_index:
         return pattern
+
     return replace(pattern, final_end_index=index)
 
 
@@ -3928,9 +4252,12 @@ def else_end_by_numbering(
         return else_end_index
     if not is_terminal_op(instructions[handler_index - 1].opname):
         return else_end_index
+
     block_end_index = else_end_index
+
     if else_end_index == body_end_index:
         block_end_index = handler_index
+
     comes_first = numbered_before(
         code,
         instructions,
@@ -3941,31 +4268,37 @@ def else_end_by_numbering(
         return handler_index
     if comes_first is False and else_end_index > body_end_index:
         return body_end_index
+
     return else_end_index
 
 
 def else_end_by_borrowed_loads(
     instructions: list[Instruction],
-    bounds: tuple[int, int, int],
+    bounds: tuple[int, int, int, int],
     handlers_leave: bool,
 ) -> int:
-    body_end_index, else_end_index, handler_index = bounds
+    body_end_index, else_end_index, handler_index, range_end_index = bounds
     if body_end_index >= handler_index:
         return else_end_index
     if not is_terminal_op(instructions[handler_index - 1].opname):
         return else_end_index
+
+    last_index = min(handler_index, range_end_index)
     block_end_index = else_end_index
+
     if else_end_index == body_end_index:
-        block_end_index = handler_index
+        block_end_index = last_index
+
     loads = [
         instruction.borrowed
         for instruction in instructions[body_end_index:block_end_index]
         if instruction.opname == "LOAD_FAST"
     ]
     if loads and all(loads) and else_end_index == body_end_index and handlers_leave:
-        return handler_index
+        return last_index
     if loads and not any(loads) and else_end_index > body_end_index:
         return body_end_index
+
     return else_end_index
 
 
@@ -3980,6 +4313,7 @@ def numbered_before(
     second: tuple[int, int],
 ) -> bool | None:
     seen = set(numbered_operands(code, instructions[: first[0]]))
+
     for kind in ("name", "const"):
         new_first = [
             number
@@ -3997,6 +4331,7 @@ def numbered_before(
             return min(new_first) < min(new_second)
         if new_first and new_second:
             return order_behind_shared_operand(set(new_first), set(new_second))
+
     return None
 
 
@@ -4005,6 +4340,7 @@ def order_behind_shared_operand(first: set[int], second: set[int]) -> bool | Non
     second_leads = not first - second or max(second) < min(first - second)
     if first_leads == second_leads:
         return None
+
     return first_leads
 
 
@@ -4016,9 +4352,10 @@ def numbered_operands(
     code: object,
     instructions: list[Instruction],
 ) -> list[tuple[str, int]]:
-    names = list(getattr(code, "co_names", ()))
+    names: list[str] = list(getattr(code, "co_names", ()))
     first_met = 1 if int(getattr(code, "co_flags", 0) or 0) & CO_OPTIMIZED else 0
     operands: list[tuple[str, int]] = []
+
     for instruction in instructions:
         opname = instruction.opname
         if opname in {"LOAD_CONST", "RETURN_CONST"} and instruction.arg is not None:
@@ -4030,6 +4367,7 @@ def numbered_operands(
             and any(part in opname for part in ("NAME", "GLOBAL", "ATTR", "METHOD"))
         ):
             operands.append(("name", names.index(instruction.argval)))
+
     return operands
 
 
@@ -4045,6 +4383,7 @@ def find_out_of_line_finally_pattern(
         return find_finally_around_endless_loop(
             instructions, spans, body, handler_index, cleanup_index
         )
+
     branching = read_branching_finally_range(
         instructions, body_end_index, handler_index
     )
@@ -4062,6 +4401,7 @@ def find_out_of_line_finally_pattern(
             final_end_index=min(branching.final_end_index, end_index),
             handler_final_range=(handler_index + 1, cleanup_index),
         )
+
     final_range = out_of_line_final_end(
         instructions,
         spans,
@@ -4075,6 +4415,7 @@ def find_out_of_line_finally_pattern(
             return None
         if instructions[branching.final_end_index].opname != "RETURN_VALUE":
             return None
+
     if final_range is None or (
         handler_index <= end_index
         and returns_value_from_several_ends(instructions, body_end_index, final_range)
@@ -4089,6 +4430,7 @@ def find_out_of_line_finally_pattern(
             final_end_index=handler_index,
             handler_final_range=(handler_index + 1, cleanup_index),
         )
+
     return OutOfLineTryPattern(
         handler_index=handler_index,
         handler_end_index=cleanup_index + 3,
@@ -4110,9 +4452,11 @@ def returns_value_from_several_ends(
     final_start_index, final_end_index, final_after_index = final_range
     if final_start_index is not None or final_after_index is not None:
         return False
+
     last = instructions[final_end_index]
     if last.opname != "RETURN_VALUE":
         return False
+
     return any(
         is_jump_op(instruction.opname)
         and isinstance(instruction.argval, int)
@@ -4133,11 +4477,14 @@ def find_finally_around_endless_loop(
     copy_index = body_end_index
     while copy_index in regions and copy_index != handler_index:
         copy_index = regions[copy_index]
+
     final_end_index: int | None = body_end_index
+
     if copy_index != handler_index:
         final_end_index = finally_copy_end(instructions, copy_index, handler_index)
     if final_end_index is None or final_end_index > end_index:
         return None
+
     return OutOfLineTryPattern(
         handler_index=handler_index,
         handler_end_index=cleanup_index + 3,
@@ -4159,6 +4506,7 @@ def finally_copy_end(
     branching = read_branching_finally_range(instructions, copy_index, handler_index)
     if branching is not None:
         return branching.final_end_index
+
     start_index = handler_index + 1
     length = handler_index - copy_index
     for step in range(length):
@@ -4167,6 +4515,7 @@ def finally_copy_end(
             return copy_index + step
         if left.opname != instructions[copy_index + step].opname:
             return None
+
     return None
 
 
@@ -4178,9 +4527,11 @@ def with_unshared_returns(
     else_end_index: int,
 ) -> tuple[OutOfLineClause, ...]:
     settled: list[OutOfLineClause] = []
+
     for clause in clauses:
         resume_index = clause.resume_index
         code_end_index = None
+
         if (
             resume_index is not None
             and else_end_index != resume_index < handler_index
@@ -4192,7 +4543,9 @@ def with_unshared_returns(
             )
         if code_end_index is not None:
             clause = replace(clause, body_end_index=code_end_index, resume_index=None)
+
         settled.append(clause)
+
     return tuple(settled)
 
 
@@ -4205,6 +4558,7 @@ def resumes_behind_enclosing_exit(
         return False
     if instructions[else_end_index].opname != "POP_EXCEPT":
         return False
+
     return instructions[clause.body_end_index + 1].opname == "POP_EXCEPT"
 
 
@@ -4223,6 +4577,7 @@ def has_later_handler(
     ]
     if not resumes:
         return False
+
     enclosing = {
         span.target_index for span in spans if span.start_index < body_end_index
     }
@@ -4243,14 +4598,18 @@ def clause_with_own_return(
         return clause
     if clause.resume_index > clause.body_start_index:
         return clause
+
     exit_index = clause.body_end_index
     while instructions[exit_index].opname == "POP_EXCEPT":
         exit_index += 1
+
     if clause.name is not None:
         exit_index += 3
+
     return_index = exit_index
     while not is_terminal_op(instructions[return_index].opname):
         return_index += 1
+
     decompiler.claimed_ranges[clause.body_end_index] = exit_index
     return replace(clause, body_end_index=return_index + 1, resume_index=None)
 
@@ -4274,9 +4633,11 @@ def clause_returning_through_finally(
     resume_index = clause.resume_index
     if resume_index is None or resume_index not in decompiler.claimed_ranges:
         return clause
+
     tail_end = terminal_tail_end_index(instructions, resume_index, len(instructions))
     if tail_end is None:
         return clause
+
     return replace(clause, body_end_index=tail_end, resume_index=None)
 
 
@@ -4292,8 +4653,10 @@ def unprotected_return_end(
         and instructions[index + 1].opname == "POP_TOP"
     ):
         index += 2
+
     if index < end_index and instructions[index].opname == "RETURN_VALUE":
         return index + 1
+
     return branch_returns_end(instructions, body_end_index, end_index)
 
 
@@ -4305,11 +4668,8 @@ def branch_returns_end(
     index = body_end_index
     while index < end_index and is_none_return(instructions[index]):
         index += 1
+
     return index if index - body_end_index > 1 else body_end_index
-
-
-def is_none_return(instruction: Instruction) -> bool:
-    return instruction.opname == "RETURN_CONST" and instruction.argval is None
 
 
 def unprotected_branch_end(
@@ -4323,12 +4683,15 @@ def unprotected_branch_end(
         jump = instructions[index]
         if not is_jump_op(jump.opname) or not isinstance(jump.argval, int):
             continue
+
         target_index = offset_to_index.get(jump.argval)
         if target_index is None or not body_end_index < target_index <= end_index:
             continue
+
         skipped = instructions[target_index - 1].opname
         if is_terminal_op(skipped) or skipped in {"JUMP_BACKWARD", "JUMP_FORWARD"}:
             body_end_index = target_index
+
     return body_end_index
 
 
@@ -4343,12 +4706,15 @@ def out_of_line_final_end(
     copy_start_index = handler_index + 1
     if instructions[copy_start_index].opname == "WITH_EXCEPT_START":
         return None
+
     copy_end_index = cleanup_index
+
     for span in spans:
         if copy_start_index < span.target_index < copy_end_index and (
             instructions[span.target_index].opname != "CLEANUP_THROW"
         ):
             copy_end_index = span.target_index
+
     copy_end_index -= 1
     if copy_end_index < copy_start_index:
         return None
@@ -4373,9 +4739,11 @@ def out_of_line_final_end(
     final_end_index = inline_start_index + len(copy)
     if final_end_index > end_index:
         return None
+
     for offset, opname in enumerate(copy):
         if opname != instructions[inline_start_index + offset].opname:
             return None
+
     return None, final_end_index, None
 
 
@@ -4406,60 +4774,130 @@ def final_block_ending_function(
     end_index: int,
 ) -> tuple[int | None, int, int | None] | None:
     copy_start_index = handler_index + 1
+
     if instructions[cleanup_index - 1].opname != "RERAISE":
         return None
+
     regions = handler_regions(instructions, spans)
     after_index = min(
         (index for index in regions if index > body_end_index), default=end_index + 1
     )
     if after_index > end_index:
         return None
+
     last = instructions[after_index - 1]
     if (last.opname != "RETURN_CONST" or last.argval is not None) and not (
         last.opname == "RETURN_VALUE" and is_none_load(instructions[after_index - 2])
     ):
         return None
+
     for offset in range(min(3, cleanup_index - 1 - copy_start_index)):
         left = instructions[copy_start_index + offset]
         right = instructions[body_end_index + offset]
         if left.opname != right.opname:
             return None
+
     while last.opname == "RETURN_VALUE" and (
         regions.get(after_index, handler_index + 1) <= handler_index
     ):
         after_index = regions[after_index]
+
     return None, after_index, after_index
 
 
 def without_closing_returns(statements: list[ast.stmt]) -> list[ast.stmt]:
     if not statements:
         return statements
+
     last = statements[-1]
     if isinstance(last, ast.Return) and (
         last.value is None
         or (isinstance(last.value, ast.Constant) and last.value.value is None)
     ):
         return without_closing_returns(statements[:-1])
+
     if isinstance(last, ast.If):
         last.body = without_closing_returns(last.body) or [ast.Pass()]
         last.orelse = without_closing_returns(last.orelse)
+
     return statements
 
 
+def may_start_table_try(
+    code: object,
+    instructions: list[Instruction],
+    offset_to_index: dict[int, int],
+    cursor: int,
+) -> bool:
+    # a table reader starts where an entry starts, or at an empty try's NOP
+    if cursor in table_start_indexes(code, instructions, offset_to_index):
+        return True
+
+    instruction = instructions[cursor]
+    return (
+        instruction.opname == "NOP"
+        and instruction.starts_line is not None
+        and bool(table_entries(code, instructions))
+    )
+
+
+@once_per_inputs
+def table_start_indexes(
+    code: object,
+    instructions: list[Instruction],
+    offset_to_index: dict[int, int],
+) -> frozenset[int]:
+    starts = (
+        offset_to_index.get(entry.start_offset)
+        for entry in table_entries(code, instructions)
+    )
+    return frozenset(start for start in starts if start is not None)
+
+
+@once_per_inputs
+def table_entries(
+    code: object,
+    instructions: list[Instruction],
+) -> tuple[ExceptionTableEntry, ...]:
+    table = bytes(getattr(code, "co_exceptiontable", b"") or b"")
+    if not table or not instructions:
+        return ()
+
+    entries: list[ExceptionTableEntry] = []
+
+    for entry in parse_exception_table(table):
+        previous = entries[-1] if entries else None
+        if (
+            previous is not None
+            and previous.end_offset == entry.start_offset
+            and (previous.target_offset, previous.depth, previous.lasti)
+            == (entry.target_offset, entry.depth, entry.lasti)
+        ):
+            entries[-1] = replace(previous, end_offset=entry.end_offset)
+            continue
+
+        entries.append(entry)
+
+    return tuple(entries)
+
+
+@once_per_inputs
 def read_table_spans(
     code: object,
     instructions: list[Instruction],
     offset_to_index: dict[int, int],
 ) -> tuple[TableSpan, ...]:
-    table = bytes(getattr(code, "co_exceptiontable", b"") or b"")
     spans: list[TableSpan] = []
-    for entry in parse_exception_table(table) if table else ():
+
+    for entry in table_entries(code, instructions):
         start_index = offset_to_index.get(entry.start_offset)
         end_index = offset_to_index.get(entry.end_offset, len(instructions))
         target_index = offset_to_index.get(entry.target_offset)
         if start_index is None or target_index is None:
             continue
+
         spans.append(TableSpan(start_index, end_index, target_index))
+
     return tuple(spans)
 
 
@@ -4470,15 +4908,19 @@ def handler_cleanup_index(
 ) -> int | None:
     if instructions[handler_index].opname != "PUSH_EXC_INFO":
         return None
+
     for span in spans:
         if span.start_index != handler_index:
             continue
+
         cleanup_index = span.target_index
         if cleanup_index + 2 >= len(instructions):
             return None
+
         cleanup = instructions[cleanup_index : cleanup_index + 3]
         if [item.opname for item in cleanup] == ["COPY", "POP_EXCEPT", "RERAISE"]:
             return cleanup_index
+
     return None
 
 
@@ -4487,13 +4929,16 @@ def handler_regions(
     spans: tuple[TableSpan, ...],
 ) -> dict[int, int]:
     regions: dict[int, int] = {}
+
     for span in spans:
         handler_index = span.target_index
         if handler_index in regions:
             continue
+
         cleanup_index = handler_cleanup_index(instructions, spans, handler_index)
         if cleanup_index is not None:
             regions[handler_index] = cleanup_index + 3
+
     return regions
 
 
@@ -4504,15 +4949,19 @@ def out_of_line_handlers_start(
 ) -> int:
     if end_index < 1 or instructions[end_index - 1].opname != "RERAISE":
         return end_index
+
     spans = read_table_spans(code, instructions, make_offset_index(instructions))
     regions = handler_regions(instructions, spans)
     start_index = end_index
+
     if end_index > 1 and instructions[end_index - 2].opname == "CALL_INTRINSIC_1":
         start_index -= 2
+
     while True:
         starts = [start for start, end in regions.items() if end == start_index]
         if not starts:
             return start_index
+
         start_index = min(starts)
 
 
@@ -4521,14 +4970,23 @@ def out_of_line_handlers_end(
     instructions: list[Instruction],
     start_index: int,
 ) -> int:
-    if start_index >= len(instructions) or (
-        instructions[start_index].opname != "PUSH_EXC_INFO"
-    ):
+    if start_index >= len(instructions):
         return start_index
+
     spans = read_table_spans(code, instructions, make_offset_index(instructions))
     regions = handler_regions(instructions, spans)
+
+    if instructions[start_index].opname != "PUSH_EXC_INFO":
+        # a loop closed by a handler ends behind it
+        owner = enclosing_handler(regions, start_index)
+        if owner is None:
+            return start_index
+
+        start_index = regions[owner]
+
     while start_index in regions:
         start_index = regions[start_index]
+
     return start_index
 
 
@@ -4538,11 +4996,13 @@ def enclosing_handler(
     skip: int | None = None,
 ) -> int | None:
     best: int | None = None
+
     for handler_index, region_end in regions.items():
         if handler_index == skip or not handler_index <= index < region_end:
             continue
         if best is None or handler_index > best:
             best = handler_index
+
     return best
 
 
@@ -4556,19 +5016,24 @@ def find_out_of_line_handler(
     regions = handler_regions(instructions, spans)
     owner = enclosing_handler(regions, cursor)
     best: tuple[int, int] | None = None
+
     for handler_index in regions:
         if handler_index in active_handlers:
             continue
         if enclosing_handler(regions, handler_index, handler_index) != owner:
             continue
+
         extent = protected_extent(instructions, spans, regions, handler_index, owner)
         if extent is None or extent[0] != cursor or extent[1] > end_index:
             continue
+
         candidate = (extent[1], handler_index)
         if best is None or candidate > best:
             best = candidate
+
     if best is None:
         return None
+
     return best[1], best[0]
 
 
@@ -4581,9 +5046,11 @@ def find_handler_of_empty_try(
     line = instructions[cursor].starts_line
     if instructions[cursor].opname != "NOP" or line is None:
         return None
+
     handler_index = first_unreferenced_handler(instructions, spans)
     if handler_index is None or handler_index in active_handlers:
         return None
+
     handler_line = instruction_line_after(instructions, handler_index)
     lines = [
         item.starts_line
@@ -4592,6 +5059,7 @@ def find_handler_of_empty_try(
     ]
     if handler_line is None or handler_line <= line or max(lines) != line:
         return None
+
     return handler_index, cursor + 1
 
 
@@ -4600,11 +5068,13 @@ def first_unreferenced_handler(
     spans: tuple[TableSpan, ...],
 ) -> int | None:
     targets = {span.target_index for span in spans}
+
     for span in spans:
         if span.start_index in targets:
             continue
         if handler_cleanup_index(instructions, spans, span.start_index) is not None:
             return span.start_index
+
     return None
 
 
@@ -4612,6 +5082,7 @@ def instruction_line_after(instructions: list[Instruction], index: int) -> int |
     for instruction in instructions[index:]:
         if instruction.starts_line is not None:
             return instruction.starts_line
+
     return None
 
 
@@ -4627,7 +5098,23 @@ def nested_protected_extent(
         known[handler_index] = protected_extent(
             instructions, spans, regions, handler_index, owner
         )
+
     return known[handler_index]
+
+
+def nested_statement_extent(
+    instructions: list[Instruction],
+    spans: tuple[TableSpan, ...],
+    regions: dict[int, int],
+    level: tuple[int, int | None],
+    known: dict[int, tuple[int, int] | None],
+) -> tuple[int, int] | None:
+    nested = level[0]
+    extent = nested_protected_extent(instructions, spans, regions, level, known)
+    if extent is not None and extent[1] == nested:
+        return extent[0], regions[nested]
+
+    return extent
 
 
 def protected_extent(
@@ -4640,6 +5127,7 @@ def protected_extent(
     start_index: int | None = None
     end_index = 0
     nested_extents: dict[int, tuple[int, int] | None] = {}
+
     for span in spans:
         if span.target_index != handler_index:
             continue
@@ -4647,6 +5135,7 @@ def protected_extent(
             continue
         if is_comprehension_cleanup(instructions, spans, span.start_index):
             continue
+
         level = enclosing_handler(regions, span.start_index)
         if level == owner:
             extent: tuple[int, int] | None = (span.start_index, span.end_index)
@@ -4654,16 +5143,21 @@ def protected_extent(
             nested = nested_handler_at_level(regions, level, owner)
             if nested is None or nested == handler_index:
                 return None
-            extent = nested_protected_extent(
+
+            extent = nested_statement_extent(
                 instructions, spans, regions, (nested, owner), nested_extents
             )
+
         if extent is None:
             return None
         if start_index is None or extent[0] < start_index:
             start_index = extent[0]
+
         end_index = max(end_index, extent[1])
+
     if start_index is None:
         return None
+
     return start_index, end_index
 
 
@@ -4686,7 +5180,9 @@ def nested_handler_at_level(
         parent = enclosing_handler(regions, handler_index, handler_index)
         if parent == owner:
             return handler_index
+
         handler_index = parent
+
     return None
 
 
@@ -4704,6 +5200,7 @@ def read_out_of_line_clauses(
         instruction = instructions[cursor]
         if instruction.opname == "RERAISE" and cursor + 1 == cleanup_index:
             return tuple(clauses)
+
         if instruction.opname == "POP_TOP":
             clause_end_index = cleanup_index
             type_start_index = None
@@ -4719,6 +5216,7 @@ def read_out_of_line_clauses(
             )
             if match is None:
                 return ()
+
             type_start_index = cursor
             type_end_index, body_start_index, clause_end_index = match
             name = exception_handler_name(
@@ -4728,6 +5226,7 @@ def read_out_of_line_clauses(
             )
             if name is None and instructions[body_start_index].opname != "POP_TOP":
                 return ()
+
             body_start_index += 1
 
         tail = read_out_of_line_clause_tail(
@@ -4751,9 +5250,12 @@ def read_out_of_line_clauses(
                 resume_index=resume_index,
             )
         )
+
         if type_start_index is None:
             return tuple(clauses)
+
         cursor = clause_end_index
+
     return ()
 
 
@@ -4775,6 +5277,7 @@ def read_out_of_line_clause_match(
             or opname.startswith("STORE_")
         ):
             return None
+
         match_index += 1
     else:
         return None
@@ -4783,9 +5286,11 @@ def read_out_of_line_clause_match(
     jump = instructions[jump_index]
     if not is_exception_false_jump(jump) or not isinstance(jump.argval, int):
         return None
+
     miss_index = offset_to_index.get(jump.argval)
     if miss_index is None or miss_index <= jump_index or miss_index >= cleanup_index:
         return None
+
     return match_index, jump_index + 1, miss_index
 
 
@@ -4805,21 +5310,23 @@ def read_out_of_line_clause_tail(
         clause_end_index,
         name,
     )
-
     exit_index = end_index
     while exit_index > body_start_index and (
         instructions[exit_index - 1].opname != "POP_EXCEPT"
     ):
         exit_index -= 1
+
     body_end_index = exit_index
     while body_end_index > body_start_index and (
         instructions[body_end_index - 1].opname == "POP_EXCEPT"
     ):
         body_end_index -= 1
+
     if exit_index == body_start_index or (
         instructions[body_end_index - 1].opname == "SWAP"
     ):
         return end_index, None, None
+
     if name is not None:
         unbind_index = find_named_exception_cleanup(
             instructions,
@@ -4829,6 +5336,7 @@ def read_out_of_line_clause_tail(
         )
         if unbind_index != exit_index:
             return end_index, None, None
+
         exit_index += 3
 
     jump_index = skip_extended_args(instructions, exit_index, end_index - 1)
@@ -4836,6 +5344,7 @@ def read_out_of_line_clause_tail(
         instructions[jump_index].opname in HANDLER_EXIT_JUMPS
     ):
         return body_end_index, jump_index, None
+
     resume_index = inlined_tail_resume_index(
         instructions,
         exit_index,
@@ -4859,6 +5368,7 @@ def read_out_of_line_clause_tail(
         instructions, body_start_index, end_index, clause_end_index
     ):
         return body_end_index, None, exit_index
+
     return end_index, None, None
 
 
@@ -4871,11 +5381,13 @@ def break_copy_resume_index(
     exit_index, end_index = tail
     if instructions[exit_index].opname != "POP_TOP":
         return None
+
     resume_index = inlined_tail_resume_index(
         instructions, exit_index + 1, end_index, after_index, handler_index
     )
     if resume_index is None or instructions[resume_index - 1].opname != "END_FOR":
         return None
+
     return resume_index
 
 
@@ -4915,6 +5427,7 @@ def is_statement_behind_clause(
         for instruction in instructions[exit_index : end_index - 1]
     ):
         return False
+
     return not any(
         instruction.is_jump_target for instruction in instructions[exit_index:end_index]
     )
@@ -4940,10 +5453,13 @@ def out_of_line_clause_code_end(
         ):
             end_index -= 4
             continue
+
         starts = [start for start, end in regions.items() if end == end_index]
         if not starts or min(starts) <= body_start_index:
             break
+
         end_index = min(starts)
+
     return end_index
 
 
@@ -4957,6 +5473,7 @@ def inlined_tail_resume_index(
     length = end_index - start_index
     if length < 1 or not is_terminal_op(instructions[end_index - 1].opname):
         return None
+
     for resume_index in range(after_index, handler_index - length + 1):
         if not same_instruction_range_behavior(
             instructions,
@@ -4968,6 +5485,7 @@ def inlined_tail_resume_index(
             continue
         if not jumps_past(instructions, after_index, resume_index):
             return resume_index
+
     return None
 
 
@@ -5000,6 +5518,7 @@ def read_out_of_line_star_clauses(
     )
     if first is None:
         return ()
+
     handlers = read_exception_group_handlers(
         instructions,
         offset_to_index,
@@ -5049,17 +5568,18 @@ def read_out_of_line_star_exit(
     jump = instructions[reraise_index + 2]
     if not is_exception_group_not_none_jump(jump):
         return None
+
     exit_index = reraise_index + 5
     end_index = offset_to_index.get(jump.argval)
     if end_index is None or end_index <= exit_index:
         return None
     if instructions[exit_index - 1].opname != "POP_EXCEPT":
         return None
-
     if end_index == exit_index + 1 and (
         instructions[exit_index].opname in HANDLER_EXIT_JUMPS
     ):
         return exit_index, None
+
     resume_index = inlined_tail_resume_index(
         instructions,
         exit_index,
@@ -5067,6 +5587,10 @@ def read_out_of_line_star_exit(
         after_index,
         handler_index,
     )
+    if resume_index is None and is_terminal_op(instructions[end_index - 1].opname):
+        # a body that never falls through leaves the tail here
+        resume_index = exit_index
+
     return None, resume_index
 
 
@@ -5076,12 +5600,14 @@ def star_clause_body_end(
 ) -> int:
     if handler.miss_index is None:
         return handler.body_end_index
+
     end_index = handler.miss_index - 1
     while end_index > handler.body_start_index and not (
         instructions[end_index].opname == "LIST_APPEND"
         and instructions[end_index + 1].opname == "POP_TOP"
     ):
         end_index -= 1
+
     if handler.name is not None:
         end_index -= 3
     if instructions[end_index - 1].opname not in HANDLER_EXIT_JUMPS:
@@ -5092,6 +5618,7 @@ def star_clause_body_end(
         end_index -= 1
     if handler.name is not None:
         end_index -= 3
+
     return max(end_index, handler.body_start_index)
 
 
@@ -5105,18 +5632,23 @@ def out_of_line_else_end(
     end_index: int,
 ) -> int | None:
     else_end_index = body_end_index
+
     for clause in clauses:
         if handler_loop_exit(decompiler, instructions, clause) is not None:
             continue
+
         target_index = clause.resume_index
+
         if clause.exit_jump_index is not None:
             target_index = offset_to_index.get(
                 instructions[clause.exit_jump_index].argval
             )
             if target_index is None:
                 return None
+
         if target_index is None:
             continue
+
         if target_index > handler_index:
             forward_end = forward_resume_else_end(
                 decompiler,
@@ -5127,15 +5659,19 @@ def out_of_line_else_end(
             )
             if forward_end is None:
                 return None
+
             else_end_index = forward_end or else_end_index
             continue
+
         if body_end_index < target_index <= end_index or skips_rest_of_branch(
             instructions, target_index, end_index
         ):
             target_index = min(target_index, end_index)
             if else_end_index not in {body_end_index, target_index}:
                 return None
+
             else_end_index = target_index
+
     return else_end_index
 
 
@@ -5144,6 +5680,7 @@ def skips_rest_of_branch(
 ) -> bool:
     if not end_index < target_index or end_index >= len(instructions):
         return False
+
     jump = instructions[end_index]
     return (
         jump.opname == "JUMP_FORWARD"
@@ -5172,6 +5709,7 @@ def else_end_before_handler(
         for instruction in instructions[:body_end_index]
     ):
         return min(handler_index, end_index)
+
     return else_end_index
 
 
@@ -5194,6 +5732,7 @@ def else_end_from_name_numbers(
         for clause in clauses
     ):
         return else_end_index
+
     regions = handler_regions(instructions, spans)
     earlier = {
         index
@@ -5212,6 +5751,7 @@ def else_end_from_name_numbers(
     behind, handled = behind - handled - known, handled - behind - known
     if behind and handled and max(behind) < min(handled):
         return range_end_index
+
     return else_end_index
 
 
@@ -5237,6 +5777,7 @@ def leaves_enclosing_handler(
         return False
     if instructions[jump_index - 1].opname != "POP_EXCEPT":
         return False
+
     inner_exit = jump_index - (5 if clause.name is not None else 2)
     return instructions[inner_exit].opname == "POP_EXCEPT"
 
@@ -5257,6 +5798,7 @@ def resumes_at_finally_copy(
 ) -> bool:
     while instructions[target_index].opname == "NOP":
         target_index += 1
+
     for step in range(len(instructions) - target_index):
         if instructions[final_index + step].opname in {"RETURN_VALUE", "SWAP"}:
             return step > 0
@@ -5264,6 +5806,7 @@ def resumes_at_finally_copy(
             instructions[final_index + step], instructions[target_index + step]
         ):
             return False
+
     return False
 
 
@@ -5275,8 +5818,10 @@ def forward_resume_else_end(
     bounds: tuple[int, int, int],
 ) -> int | None:
     body_end_index, handler_index, end_index = bounds
+
     if clause.exit_jump_index is None:
         return handler_index if handler_index <= end_index else 0
+
     resume_offset = instructions[target_index].offset
     if resume_offset not in decompiler.detached_resume_offsets:
         before_handler = instructions[handler_index - 1].opname
@@ -5288,6 +5833,7 @@ def forward_resume_else_end(
             instructions, end_index, target_index
         ):
             return 0
+
         jump_index = handler_index - 1
         if (
             jump_index == body_end_index
@@ -5303,5 +5849,7 @@ def forward_resume_else_end(
             and instructions[jump_index].argval == resume_offset
         ):
             return jump_index
+
         return None
+
     return end_index

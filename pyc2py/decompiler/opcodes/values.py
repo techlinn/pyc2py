@@ -1,9 +1,9 @@
 import ast
 import math
-from types import CodeType
-from typing import Any
+from typing import Any, cast
 
 from pyc2py.astree import constant_sort_key, is_none_constant, make_name
+from pyc2py.pyc.code import CodeObject
 from pyc2py.pyc.objects import (
     FrozenDictValue,
     LegacyByteString,
@@ -18,14 +18,11 @@ def is_code_constant(value: object) -> bool:
     return isinstance(value, ast.Constant) and hasattr(value.value, "co_code")
 
 
-def code_from_constant(value: object) -> CodeType | None:
-    if isinstance(value, ast.Constant) and isinstance(value.value, CodeType):
-        return value.value
+def code_from_constant(value: object) -> CodeObject | None:
+    if is_code_constant(value):
+        return cast(CodeObject, cast(ast.Constant, value).value)
+
     return None
-
-
-def is_zero_constant(value: Any) -> bool:
-    return isinstance(value, ast.Constant) and value.value == 0
 
 
 def make_constant(
@@ -63,6 +60,7 @@ def make_special_constant(
         return ast.UnaryOp(op=ast.USub(), operand=ast.Constant(value=-value))
     if isinstance(value, int) and not isinstance(value, bool):
         return ast.Constant(value=int(value))
+
     return None
 
 
@@ -83,20 +81,30 @@ def make_collection_constant(
     legacy_strings_as_bytes: bool,
 ) -> ast.expr | None:
     if isinstance(value, (tuple, list)):
-        return make_sequence_constant(value, legacy_strings_as_bytes)
+        sequence = cast("tuple[object, ...] | list[object]", value)
+        return make_sequence_constant(sequence, legacy_strings_as_bytes)
+
     if isinstance(value, MarshalSetValue):
-        return make_set_constant(value.items, legacy_strings_as_bytes)
-    if isinstance(value, frozenset):
+        # the stored order depends on the compiler's hash seed
         return make_set_constant(
-            sorted(value, key=constant_sort_key),
+            sorted(value.items, key=constant_sort_key),
             legacy_strings_as_bytes,
         )
+
+    if isinstance(value, frozenset):
+        members = cast("frozenset[object]", value)
+        return make_set_constant(
+            sorted(members, key=constant_sort_key),
+            legacy_strings_as_bytes,
+        )
+
     if is_builtin_frozen_dict(value):
         return make_frozen_dict_call(dict(value).items())
     if isinstance(value, FrozenDictValue):
         return make_frozen_dict_constant(value)
     if isinstance(value, slice):
-        return make_slice_constant(value)
+        return make_slice_constant(cast("slice", value))
+
     return None
 
 
@@ -106,7 +114,9 @@ def make_legacy_byte_string_constant(
 ) -> ast.Constant:
     if legacy_strings_as_bytes:
         return ast.Constant(value=value.encode("latin-1", errors="surrogateescape"))
-    return ast.Constant(value=str(value))
+
+    # a plain str would be unicode in Python 2
+    return ast.Constant(value=value)
 
 
 def make_legacy_long_constant(value: LegacyLong) -> ast.Call:
@@ -127,6 +137,7 @@ def make_nan_constant(value: float, negative_nan: bool | None) -> ast.expr:
             op=ast.USub(),
             operand=ast.Constant(value=float("nan")),
         )
+
     return ast.Constant(value=float("nan"))
 
 
@@ -135,8 +146,10 @@ def make_sequence_constant(
     legacy_strings_as_bytes: bool,
 ) -> ast.Tuple | ast.List:
     elements = make_constant_elements(value, legacy_strings_as_bytes)
+
     if isinstance(value, tuple):
         return ast.Tuple(elts=elements, ctx=ast.Load())
+
     return ast.List(elts=elements, ctx=ast.Load())
 
 
@@ -192,10 +205,12 @@ def written_slice(index: ast.expr | ast.Slice) -> ast.expr | ast.Slice:
     if isinstance(index, ast.Tuple):
         index.elts = [written_slice(item) for item in index.elts]
         return index
+
     if not isinstance(index, ast.Call) or not getattr(
         index, "_pyc2py_slice_constant", False
     ):
         return index
+
     lower, upper, step = (none_to_empty(bound) for bound in index.args)
     return make_slice(lower, upper, step)
 
@@ -203,6 +218,7 @@ def written_slice(index: ast.expr | ast.Slice) -> ast.expr | ast.Slice:
 def none_to_empty(value: ast.expr) -> ast.expr | None:
     if is_none_constant(value):
         return None
+
     return value
 
 
@@ -276,13 +292,13 @@ COMPARE_OPS: dict[str, type[ast.cmpop]] = {
 
 def conversion_for_format_flags(flags: int) -> int:
     conversion = flags & 0x03
-
     if conversion == 1:
         return ord("s")
     if conversion == 2:
         return ord("r")
     if conversion == 3:
         return ord("a")
+
     return -1
 
 
@@ -293,6 +309,7 @@ def conversion_for_convert_value(arg: int) -> int:
         return ord("r")
     if arg == 3:
         return ord("a")
+
     return -1
 
 
@@ -327,6 +344,7 @@ def make_formatted_with_spec(
     if isinstance(value, ast.FormattedValue):
         value.format_spec = format_spec
         return ast.JoinedStr(values=[value])
+
     return make_joined_formatted_value(value, -1, format_spec)
 
 
@@ -372,6 +390,7 @@ def make_slice_operand(
         return make_slice(start, stop)
     if count == 3:
         return make_slice(start, stop, step)
+
     return None
 
 
@@ -387,6 +406,7 @@ def make_legacy_slice_operand(
         return target_value, make_slice(lower, None)
     if mode == "2":
         return target_value, make_slice(None, upper)
+
     return target_value, make_slice(lower, upper)
 
 

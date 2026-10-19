@@ -2,7 +2,7 @@ import sys
 import unittest
 from types import CodeType
 
-from pyc2py.reporting import code_behaviour
+from pyc2py.code_behaviour import code_behaviour
 
 
 def function_code(source: str) -> CodeType:
@@ -104,7 +104,8 @@ class CodeBehaviourTests(unittest.TestCase):
         self.assert_different(
             "def f(p):\n    try:\n        a = g(p)\n    except E:\n        raise K\n"
             "    b = h(a)\n    return b\n",
-            "def f(p):\n    try:\n        a = g(p)\n        b = h(a)\n        return b\n"
+            "def f(p):\n    try:\n        a = g(p)\n"
+            "        b = h(a)\n        return b\n"
             "    except E:\n        raise K\n",
         )
 

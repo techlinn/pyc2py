@@ -14,14 +14,15 @@ class ReadBudget:
 
 @dataclass(slots=True)
 class NativeResult:
-    source: str
+    # None when not written: a nested scope is written with its module
+    source: str | None
     warnings: tuple[str, ...]
     body: tuple[ast.stmt, ...] | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class UnpackSlot:
-    group: "UnpackGroup"
+    group: UnpackGroup
     index: int
 
 
@@ -61,6 +62,7 @@ class DecompilerContext(Protocol):
     active_handlers: frozenset[int] = frozenset()
     detached_resume_offsets: frozenset[int] = frozenset()
     evaluating_test_operand: bool = False
+    evaluating_values: bool = False
     handler_exit_indexes: set[int] = set()
     compare_chain_links: dict[int, tuple[ast.expr, ast.Compare]] = {}
     compare_chain_cleanups: set[int] = set()
@@ -69,16 +71,19 @@ class DecompilerContext(Protocol):
     add_global_name: Callable[[str], None]
     decompile: Callable[[], NativeResult | None]
     join_compare_chain: Callable[[ast.Compare], ast.Compare]
-    make_child: Callable[[], "DecompilerContext"]
+    make_child: Callable[[], DecompilerContext]
     make_async_function_comprehension: Callable[
         [list[Instruction], dict[int, int], int, ast.expr], ast.expr | None
     ]
     make_function_comprehension: Callable[
         [list[Instruction], dict[int, int], int, ast.expr], ast.expr | None
     ]
-    new_child: Callable[[object], "DecompilerContext"]
+    new_child: Callable[[object], DecompilerContext]
     build_looped_condition: Callable[
         [list[Instruction], dict[int, int], int, list[int], int], ast.expr | None
+    ]
+    block_loop_test: Callable[
+        [list[Instruction], dict[int, int], int, int], tuple[ast.expr, int] | None
     ]
     evaluate_expression_range: Callable[[list[Instruction], int, int], ast.expr | None]
     expression_from_stack_value: Callable[[object], ast.expr]

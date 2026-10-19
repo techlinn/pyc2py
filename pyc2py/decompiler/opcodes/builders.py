@@ -1,16 +1,15 @@
 import ast
-from typing import cast
+from typing import Any, cast
 
 
 def make_sequence(opname: str, values: list[ast.expr]) -> ast.expr:
     if opname == "BUILD_TUPLE":
         return ast.Tuple(elts=values, ctx=ast.Load())
-
     if opname == "BUILD_LIST":
         return ast.List(elts=values, ctx=ast.Load())
-
     if opname == "BUILD_SET":
         return ast.Set(elts=values)
+
     raise ValueError(f"unsupported sequence builder: {opname}")
 
 
@@ -18,14 +17,14 @@ def make_unpacked_sequence(opname: str, values: list[ast.expr]) -> ast.expr:
     items: list[ast.expr] = [
         ast.Starred(value=value, ctx=ast.Load()) for value in values
     ]
+
     if opname in {"BUILD_TUPLE_UNPACK", "BUILD_TUPLE_UNPACK_WITH_CALL"}:
         return ast.Tuple(elts=items, ctx=ast.Load())
-
     if opname == "BUILD_LIST_UNPACK":
         return ast.List(elts=items, ctx=ast.Load())
-
     if opname == "BUILD_SET_UNPACK":
         return ast.Set(elts=items)
+
     raise ValueError(f"unsupported unpack sequence builder: {opname}")
 
 
@@ -43,6 +42,7 @@ def make_const_key_map(
 ) -> ast.Dict | None:
     if not isinstance(keys, ast.Tuple) or len(keys.elts) != count:
         return None
+
     return ast.Dict(keys=list(keys.elts), values=values)
 
 
@@ -51,7 +51,9 @@ def iterable_to_literal_items(iterable: ast.expr) -> list[ast.expr]:
         return list(iterable.elts)
 
     if isinstance(iterable, ast.Constant) and isinstance(iterable.value, tuple):
-        return [ast.Constant(value=item) for item in iterable.value]
+        items = cast("tuple[Any, ...]", iterable.value)
+        return [ast.Constant(value=item) for item in items]
+
     return [ast.Starred(value=iterable, ctx=ast.Load())]
 
 
@@ -125,6 +127,7 @@ def update_dict_literal_or_statement(
             container.keys.extend(mapping.keys)
             container.values.extend(mapping.values)
             return None
+
         container.keys.append(None)
         container.values.append(mapping)
         return None

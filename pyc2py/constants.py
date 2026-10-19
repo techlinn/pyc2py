@@ -6,3 +6,7 @@ MAX_AST_NODES = 1_000_000
 MAX_CFG_BLOCKS = 500_000
 MAX_CFG_EDGES = 2_000_000
 MAX_SOURCE_LINE_LENGTH = 240
+MAX_SOURCE_LINES = 1_000_000
+MAX_CODE_OBJECTS = 10_000
+# a layer may not unpack into more than this, whatever the wrapper claims
+MAX_LAYER_BYTES = 16 * 1024 * 1024

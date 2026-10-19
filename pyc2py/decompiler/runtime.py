@@ -1,14 +1,17 @@
 import ast
+import inspect
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from itertools import pairwise
-from types import CodeType
-from typing import Any
+from typing import Any, cast
 
 from pyc2py.astree import (
+    SCOPES,
     expression_key,
+    make_gap,
     make_name,
     mark_line,
+    mark_statement_line,
     safe_identifier,
 )
 from pyc2py.bytecode.decoder import decode_instructions
@@ -18,7 +21,11 @@ from pyc2py.bytecode.metadata import (
     make_offset_index,
     skip_ignorable_instructions,
 )
-from pyc2py.decompiler.context import DecompilerContext, UnpackSlot
+from pyc2py.bytecode.opcode_table import (
+    FORWARD_JUMPS,
+    LOOP_BACK_JUMPS,
+)
+from pyc2py.decompiler.context import DecompilerContext, NativeResult, UnpackSlot
 from pyc2py.decompiler.opcodes.imports_calls import (
     ImportedAttributeValue,
     ImportValue,
@@ -47,36 +54,39 @@ from pyc2py.decompiler.recover import (
 )
 from pyc2py.decompiler.structures import (
     condition_from_jump,
+    find_loop_back_jump,
     invert_condition,
+    is_conditional_jump_name,
     is_false_jump,
     is_forward_conditional_jump,
     unwrap_truth_test,
 )
+from pyc2py.pyc.code import CodeObject, is_coroutine_code
+from pyc2py.types import MISSING_BODY
 
-CO_HAS_DOCSTRING = 0x4000000
+# every comprehension before 3.12
+COMPREHENSION_CODE_NAMES = frozenset({"<listcomp>", "<setcomp>", "<dictcomp>"})
 
 ChildSpawner = Callable[[object], "DecompilerContext"]
 
 
 def has_code_docstring(code: Any, version: tuple[int, ...] | None) -> bool:
-    # up to python 3.13 the first constant of a function is its docstring or
-    # None. 3.14 only keeps a first constant for a docstring when there is
-    # one and says so with a flag; without the flag a string in front is just
-    # the first constant the body uses
+    # to 3.13 a first constant is the docstring or None; 3.14 flags a docstring
     if version is None or version < (3, 14):
         return True
-    return bool(int(getattr(code, "co_flags", 0) or 0) & CO_HAS_DOCSTRING)
+
+    return bool(int(getattr(code, "co_flags", 0) or 0) & inspect.CO_HAS_DOCSTRING)
 
 
 @dataclass(frozen=True, slots=True)
 class FunctionValue:
-    code: CodeType
+    code: CodeObject
     defaults: tuple[ast.expr, ...] = ()
     kw_defaults: dict[str, ast.expr] | None = None
     annotations: dict[str, ast.expr] | None = None
     decorators: tuple[ast.expr, ...] = ()
     type_params: tuple[ast.expr, ...] = ()
-    annotate: "FunctionValue | None" = None
+    annotate: FunctionValue | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,7 +97,7 @@ class BuildClassValue:
 
 @dataclass(frozen=True, slots=True)
 class ClassValue:
-    code: CodeType
+    code: CodeObject
     bases: tuple[ast.expr, ...]
     type_params: tuple[ast.expr, ...] = ()
     keywords: tuple[ast.keyword, ...] = ()
@@ -118,10 +128,8 @@ class TypeAliasValue:
 
 
 def unpack_counts(instruction: Instruction) -> tuple[int, int | None]:
-    if instruction.opname == "UNPACK_SEQUENCE_TWO_TUPLE":
-        return 2, None
-
     arg = int(instruction.arg or 0)
+
     if instruction.opname != "UNPACK_EX":
         return arg, None
 
@@ -139,18 +147,23 @@ def make_function_def(
     kw_defaults: dict[str, ast.expr] | None = None,
     annotations: dict[str, ast.expr] | None = None,
     decorators: tuple[ast.expr, ...] = (),
-    type_params: tuple[ast.AST, ...] = (),
+    type_params: tuple[ast.type_param, ...] = (),
     annotate: FunctionValue | None = None,
 ) -> ast.FunctionDef | ast.AsyncFunctionDef:
-    body_result = spawn(code).decompile()
+    body_result = decompile_body(spawn, code)
     body_warnings = list(result_warnings(body_result))
     body_module = parse_body_or_empty(body_result, body_warnings)
     body = body_module.body or [ast.Pass()]
+
     if has_code_docstring(code, version):
         body = recover_with_code_docstring(code, body)
+
     function = recover_make_function_node(name, code, body)
+    mark_statement_line(function, getattr(code, "co_firstlineno", None))
+    mark_empty_body(function, code, version)
     mark_scope_warnings(function, name, body_warnings)
     function.args.defaults = list(defaults)
+
     if kw_defaults:
         function.args.kw_defaults = [
             kw_defaults.get(argument.arg) for argument in function.args.kwonlyargs
@@ -165,8 +178,105 @@ def make_function_def(
         apply_function_annotations(function, resolved_annotations)
 
     function.decorator_list = list(decorators)
-    setattr(function, "type_params", list(type_params))
+    drop_type_param_nonlocals(function, type_params)
+    function.type_params = list(type_params)
     return function
+
+
+def mark_empty_body(
+    node: ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef,
+    code: Any,
+    version: tuple[int, ...] | None,
+) -> None:
+    # the pass of an empty body sits where the code's last line starts
+    if len(node.body) != 1 or not isinstance(node.body[0], ast.Pass):
+        return
+
+    lines = [
+        instruction.starts_line
+        for instruction in decode_instructions(code, version)
+        if instruction.starts_line is not None
+    ]
+    if lines:
+        mark_statement_line(node.body[0], max(lines))
+
+
+def drop_type_param_nonlocals(
+    scope: ast.AST, type_params: tuple[ast.type_param, ...]
+) -> None:
+    # a type parameter cannot be declared nonlocal
+    names = {str(getattr(param, "name", "")) for param in type_params} - {""}
+    if names:
+        drop_nonlocals(scope, names)
+
+
+def drop_nonlocals(scope: ast.AST, names: set[str]) -> None:
+    pending = [scope]
+    while pending:
+        node = pending.pop()
+        if node is not scope and isinstance(node, SCOPES):
+            # below a function that binds a name, the name is that function's
+            rest = names if isinstance(node, ast.ClassDef) else names - own_names(node)
+            if rest:
+                drop_nonlocals(node, rest)
+            continue
+
+        for field in ("body", "orelse", "finalbody"):
+            block = getattr(node, field, None)
+            if isinstance(block, list) and block:
+                statements = cast("list[ast.stmt]", block)
+                setattr(node, field, without_names(statements, names) or [ast.Pass()])
+
+        pending.extend(ast.iter_child_nodes(node))
+
+
+def without_names(block: list[ast.stmt], names: set[str]) -> list[ast.stmt]:
+    kept: list[ast.stmt] = []
+
+    for statement in block:
+        if isinstance(statement, ast.Nonlocal):
+            statement.names = [name for name in statement.names if name not in names]
+            if not statement.names:
+                continue
+
+        kept.append(statement)
+
+    return kept
+
+
+def own_names(function: ast.AST) -> set[str]:
+    # the names a function binds itself, not through nonlocal or global
+    arguments = getattr(function, "args", None)
+    bound: set[str] = (
+        set()
+        if arguments is None
+        else {
+            argument.arg
+            for argument in (
+                *arguments.posonlyargs,
+                *arguments.args,
+                *arguments.kwonlyargs,
+                *filter(None, (arguments.vararg, arguments.kwarg)),
+            )
+        }
+    )
+    declared: set[str] = set()
+    pending = list(ast.iter_child_nodes(function))
+    while pending:
+        node = pending.pop()
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+            bound.add(node.id)
+        elif isinstance(node, (ast.Nonlocal, ast.Global)):
+            declared.update(node.names)
+
+        if isinstance(node, SCOPES):
+            if not isinstance(node, ast.Lambda):
+                bound.add(node.name)
+            continue
+
+        pending.extend(ast.iter_child_nodes(node))
+
+    return bound - declared
 
 
 def function_annotations_from_code(
@@ -181,9 +291,11 @@ def function_annotations_from_code(
             annotations = annotation_dict_from_ast_dict_literal(statement.value)
             if annotations is None or not stores_annotation_text(code):
                 return annotations
+
             return {
                 name: annotation_from_text(value) for name, value in annotations.items()
             }
+
     return None
 
 
@@ -191,10 +303,13 @@ def annotation_dict_from_ast_dict_literal(
     value: ast.Dict,
 ) -> dict[str, ast.expr] | None:
     result: dict[str, ast.expr] = {}
+
     for key, annotation in zip(value.keys, value.values, strict=True):
         if not isinstance(key, ast.Constant) or not isinstance(key.value, str):
             return None
+
         result[key.value] = annotation
+
     return result
 
 
@@ -206,6 +321,7 @@ def apply_function_annotations(
         annotation = annotations.get(argument.arg)
         if annotation is not None:
             argument.annotation = annotation
+
     if function.args.vararg is not None and function.args.vararg.annotation is not None:
         function.args.vararg.annotation = normalize_vararg_annotation(
             function.args.vararg.annotation
@@ -223,15 +339,18 @@ def normalize_vararg_annotation(annotation: ast.expr) -> ast.expr:
         return annotation
     if not isinstance(annotation.value, ast.Name):
         return annotation
+
     return ast.Starred(value=annotation.value, ctx=ast.Load())
 
 
 def function_annotation_arguments(arguments: ast.arguments) -> list[ast.arg]:
     result = [*arguments.posonlyargs, *arguments.args, *arguments.kwonlyargs]
+
     if arguments.vararg is not None:
         result.append(arguments.vararg)
     if arguments.kwarg is not None:
         result.append(arguments.kwarg)
+
     return result
 
 
@@ -241,16 +360,19 @@ def make_class_def(
     code: Any,
     version: tuple[int, ...] | None,
     bases: tuple[ast.expr, ...],
-    type_params: tuple[ast.AST, ...] = (),
+    type_params: tuple[ast.type_param, ...] = (),
     keywords: tuple[ast.keyword, ...] = (),
     decorators: tuple[ast.expr, ...] = (),
 ) -> ast.ClassDef:
-    body_result = spawn(code).decompile()
+    body_result = decompile_body(spawn, code)
     body_warnings = list(result_warnings(body_result))
     body_module = parse_body_or_empty(body_result, body_warnings)
     class_node = recover_make_class_node(name, bases, body_module.body)
+    mark_statement_line(class_node, getattr(code, "co_firstlineno", None))
+    mark_empty_body(class_node, code, version)
     mark_scope_warnings(class_node, name, body_warnings)
-    setattr(class_node, "type_params", list(type_params))
+    drop_type_param_nonlocals(class_node, type_params)
+    class_node.type_params = list(type_params)
     class_node.keywords = list(keywords)
     class_node.decorator_list = list(decorators)
     return class_node
@@ -258,21 +380,23 @@ def make_class_def(
 
 def make_class_value(
     arguments: list[object],
-    version: tuple[int, ...] | None,
     kw_names: tuple[str, ...] = (),
 ) -> ClassValue | ast.Constant:
     keywords: tuple[ast.keyword, ...] = ()
+
     if kw_names and len(kw_names) <= len(arguments) - 2:
         keywords = tuple(
             ast.keyword(arg=name, value=coerce_expr(value))
             for name, value in zip(kw_names, arguments[-len(kw_names) :], strict=True)
         )
         arguments = arguments[: -len(kw_names)]
+
     if len(arguments) < 2:
         return ast.Constant(value=None)
 
     function = arguments[0]
     class_name = arguments[1]
+
     if not isinstance(function, FunctionValue):
         return ast.Constant(value=None)
     if not isinstance(class_name, ast.Constant) or not isinstance(
@@ -280,7 +404,7 @@ def make_class_value(
     ):
         return ast.Constant(value=None)
 
-    bases = make_class_bases(arguments[2:], version)
+    bases: tuple[Any, ...] = tuple(arguments[2:])
     return ClassValue(code=function.code, bases=bases, keywords=keywords)
 
 
@@ -293,24 +417,16 @@ def make_unpacked_class_value(
 ) -> ClassValue | None:
     if not isinstance(arguments, ast.Tuple) or len(arguments.elts) < 2:
         return None
+
     function = getattr(arguments.elts[0], FUNCTION_VALUE_MARK, None)
     if not isinstance(function, FunctionValue):
         return None
+
     return ClassValue(
         code=function.code,
         bases=tuple(arguments.elts[2:]),
         keywords=tuple(keywords),
     )
-
-
-def make_class_bases(
-    raw_bases: list[Any],
-    version: tuple[int, ...] | None,
-) -> tuple[ast.expr, ...]:
-    bases = tuple(raw_bases)
-    if version is not None and (3, 0) <= version < (3, 5):
-        return tuple(reversed(bases))
-    return bases
 
 
 def make_lambda_expr(
@@ -322,15 +438,59 @@ def make_lambda_expr(
 ) -> ast.Lambda:
     child = spawn(code)
     instructions = decode_instructions(code, version)
-    statements = child.translate_range(instructions, 0, len(instructions))
-    body: ast.expr = ast.Constant(value=None)
-    for statement in statements:
-        if isinstance(statement, ast.Return) and statement.value is not None:
-            body = statement.value
-            break
+    statements = list(child.translate_range(instructions, 0, len(instructions)))
+    if statements and is_format_guard(code, statements[0]):
+        statements = statements[1:]
+
+    body = lambda_body_expression(statements)
+    if body is None:
+        child.warnings.append(f"{MISSING_BODY}: no return value was recovered")
+        body = ast.Constant(value=None)
+
     node = make_lambda_node(code, body, defaults, kw_defaults)
     mark_scope_warnings(node, "<lambda>", child.warnings)
     return node
+
+
+def is_format_guard(code: Any, statement: ast.stmt) -> bool:
+    if tuple(getattr(code, "co_varnames", ())[:1]) not in {(".format",), ("format",)}:
+        return False
+    if not isinstance(statement, ast.If) or statement.orelse:
+        return False
+
+    test = statement.test
+    if not (
+        isinstance(test, ast.Compare)
+        and isinstance(test.left, ast.Name)
+        and [type(op) for op in test.ops] == [ast.Gt]
+        and len(test.comparators) == 1
+        and isinstance(test.comparators[0], ast.Constant)
+        and test.comparators[0].value == 2
+    ):
+        return False
+
+    return [ast.dump(item) for item in statement.body] == [
+        ast.dump(ast.Raise(exc=ast.Name(id="NotImplementedError", ctx=ast.Load())))
+    ]
+
+
+def lambda_body_expression(statements: list[ast.stmt]) -> ast.expr | None:
+    if not statements:
+        return None
+
+    first = statements[0]
+    if isinstance(first, ast.Return):
+        return first.value
+
+    if isinstance(first, ast.If):
+        body = lambda_body_expression(first.body)
+        orelse = lambda_body_expression(first.orelse or statements[1:])
+        if body is None or orelse is None:
+            return None
+
+        return ast.IfExp(test=first.test, body=body, orelse=orelse)
+
+    return None
 
 
 def make_lambda_node(
@@ -341,11 +501,15 @@ def make_lambda_node(
 ) -> ast.Lambda:
     arguments = recover_make_arguments(code)
     arguments.defaults = list(defaults)
+
     if kw_defaults:
         arguments.kw_defaults = [
             kw_defaults.get(argument.arg) for argument in arguments.kwonlyargs
         ]
-    return ast.Lambda(args=arguments, body=body)
+
+    node = ast.Lambda(args=arguments, body=body)
+    mark_line(node, getattr(code, "co_firstlineno", None))
+    return node
 
 
 def make_generator_expr(
@@ -374,6 +538,7 @@ def make_generator_expr(
     )
     if async_generator is not None:
         return async_generator
+
     if version is not None and version < (3, 13):
         read = make_function_comprehension(
             spawn, code, iterable, version, instructions, load_iterator_index + 1
@@ -388,6 +553,7 @@ def make_generator_expr(
     )
     if shape is None:
         return None
+
     return make_sync_generator_expr(spawn, code, iterable, version, shape)
 
 
@@ -409,9 +575,13 @@ def make_sync_generator_expr(
         return None
 
     if has_test_inside_element(instructions, shape, yield_index):
-        structured = make_structured_generator_expr(spawn, code, iterable, version)
+        structured = make_structured_generator_expr(
+            spawn, code, iterable, version
+        ) or make_generator_expr_from_loop_body(spawn, code, iterable, shape)
         if structured is not None:
             return structured
+        if has_branching_element(instructions, shape, yield_index):
+            return None
 
     generators = [make_generator(target=shape.target, iterator=iterable)]
     expression_scan_start = shape.store_index + 1
@@ -448,18 +618,66 @@ def make_sync_generator_expr(
     return make_generator_exp(element, generators)
 
 
+def make_generator_expr_from_loop_body(
+    spawn: ChildSpawner,
+    code: Any,
+    iterable: ast.expr,
+    shape: ComprehensionLoopShape,
+) -> ast.GeneratorExp | None:
+    instructions = shape.instructions
+    loop_offset = int(instructions[shape.for_iter_index].offset)
+    back_jump_index = find_loop_back_jump(
+        instructions, {loop_offset}, shape.store_index + 1, shape.loop_end_index
+    )
+    if back_jump_index is None:
+        return None
+
+    child = spawn(code)
+    child.loop_continue_offsets = frozenset({loop_offset})
+    body = child.translate_range(instructions, shape.store_index + 1, back_jump_index)
+    generators = [make_generator(target=shape.target, iterator=iterable)]
+    body = read_generator_tests(body, generators[0])
+    while len(body) == 1 and isinstance(body[0], ast.For) and not body[0].orelse:
+        loop = body[0]
+        generators.append(make_generator(target=loop.target, iterator=loop.iter))
+        body = read_generator_tests(loop.body, generators[-1])
+
+    if len(body) != 1 or not isinstance(body[0], ast.Expr):
+        return None
+
+    element = body[0].value
+    if not isinstance(element, ast.Yield) or element.value is None:
+        return None
+
+    return make_generator_exp(element.value, generators)
+
+
+def has_branching_element(
+    instructions: list[Instruction],
+    shape: ComprehensionLoopShape,
+    yield_index: int,
+) -> bool:
+    return any(
+        instruction.opname in FORWARD_JUMPS
+        for instruction in instructions[shape.store_index + 1 : yield_index]
+    )
+
+
 def has_test_inside_element(
     instructions: list[Instruction],
     shape: ComprehensionLoopShape,
     yield_index: int,
 ) -> bool:
     loop_offset = int(instructions[shape.for_iter_index].offset)
+
     for index in range(shape.store_index + 1, yield_index):
         if not is_forward_conditional_jump(instructions[index]):
             continue
+
         following = instructions[index + 1]
         if following.opname != "JUMP_BACKWARD" or following.argval != loop_offset:
             return True
+
     return False
 
 
@@ -470,20 +688,25 @@ def make_structured_generator_expr(
     version: tuple[int, ...] | None,
 ) -> ast.GeneratorExp | None:
     child = spawn(code)
-    instructions = decode_instructions(code, version)
+    instructions = without_prologue_after_iterator(decode_instructions(code, version))
     body = child.translate_range(instructions, 0, len(instructions))
     if body and isinstance(body[-1], ast.Return):
         body = body[:-1]
+
     generators: list[ast.comprehension] = []
+
     while len(body) == 1 and isinstance(body[0], ast.For) and not body[0].orelse:
         loop = body[0]
         generators.append(make_generator(target=loop.target, iterator=loop.iter))
         body = read_generator_tests(loop.body, generators[-1])
+
     if not generators or len(body) != 1 or not isinstance(body[0], ast.Expr):
         return None
+
     element = body[0].value
     if not isinstance(element, ast.Yield) or element.value is None:
         return None
+
     generators[0].iter = iterable
     return make_generator_exp(element.value, generators)
 
@@ -502,7 +725,13 @@ def read_generator_tests(
             body = test.body
         else:
             break
+
     return body
+
+
+def map_add_key_is_on_top(version: tuple[int, ...] | None) -> bool:
+    # 3.8 swapped MAP_ADD's operands
+    return version is not None and version < (3, 8)
 
 
 def make_comprehension_expr(
@@ -514,7 +743,7 @@ def make_comprehension_expr(
     code_name = str(getattr(code, "co_name", ""))
     if code_name == "<genexpr>":
         return make_generator_expr(spawn, code, iterable, version)
-    if code_name not in {"<listcomp>", "<setcomp>", "<dictcomp>"}:
+    if code_name not in COMPREHENSION_CODE_NAMES:
         return None
 
     instructions = decode_instructions(code, version)
@@ -534,6 +763,7 @@ def make_comprehension_expr(
     )
     if shape is None:
         return None
+
     return make_sync_comprehension_expr(
         spawn, code, iterable, version, code_name, shape
     )
@@ -550,6 +780,7 @@ def make_function_comprehension(
     child = spawn(code)
     offset_to_index = make_offset_index(instructions)
     value: ast.expr | None = None
+
     if instructions[for_iter_index].opname == "FOR_ITER":
         value = child.make_function_comprehension(
             instructions, offset_to_index, for_iter_index, iterable
@@ -561,8 +792,10 @@ def make_function_comprehension(
             for_iter_index,
             unwrap_async_iterator_call(iterable),
         )
+
     if value is not None and is_coroutine_code(code):
         setattr(value, AWAITED_BY_CALLER_MARK, True)
+
     return value
 
 
@@ -611,13 +844,33 @@ def make_sync_comprehension_expr(
 
     generator = make_generator(target=shape.target, iterator=iterable)
     generator.ifs.extend(conditions)
+
     if code_name == "<listcomp>":
         return make_list_comp(stack_values[-1], [generator])
     if code_name == "<setcomp>":
         return make_set_comp(stack_values[-1], [generator])
     if len(stack_values) < 2:
         return None
+
     return make_dict_comp(stack_values[-2], stack_values[-1], [generator])
+
+
+def without_prologue_after_iterator(
+    instructions: list[Instruction],
+) -> list[Instruction]:
+    for index, instruction in enumerate(instructions):
+        if instruction.opname == "GET_ITER":
+            after = skip_generator_start(instructions, index + 1)
+            if after != index + 1:
+                return instructions[: index + 1] + instructions[after:]
+            break
+
+    return instructions
+
+
+def skip_generator_start(instructions: list[Instruction], index: int) -> int:
+    names = [item.opname for item in instructions[index : index + 3]]
+    return index + 3 if names == ["RETURN_GENERATOR", "POP_TOP", "RESUME"] else index
 
 
 def read_comprehension_loop_shape(
@@ -632,10 +885,12 @@ def read_comprehension_loop_shape(
     )
     if for_iter_index >= len(instructions):
         return None
+
     if instructions[for_iter_index].opname == "GET_ITER":
-        for_iter_index += 1
+        for_iter_index = skip_generator_start(instructions, for_iter_index + 1)
         if for_iter_index >= len(instructions):
             return None
+
     for_iter = instructions[for_iter_index]
     if for_iter.opname != "FOR_ITER":
         return None
@@ -657,6 +912,7 @@ def read_comprehension_loop_shape(
         mark_line(target, line_in_effect(instructions, store_index))
     if target is None:
         return None
+
     return ComprehensionLoopShape(
         instructions=instructions,
         offset_to_index=offset_to_index,
@@ -758,6 +1014,7 @@ def find_async_generator_store(
     )
     if store_index >= end_index or instructions[store_index].opname != "STORE_FAST":
         return None
+
     return store_index
 
 
@@ -776,6 +1033,7 @@ def async_generator_end_send_index(
         return None
     if instructions[end_send_index].opname != "END_SEND":
         return None
+
     return end_send_index
 
 
@@ -790,6 +1048,7 @@ def find_async_generator_yield_wrap(
             continue
         if intrinsic_1_name(instruction) == "INTRINSIC_ASYNC_GEN_WRAP":
             return index
+
     return None
 
 
@@ -800,6 +1059,7 @@ def intrinsic_1_name(instruction: Instruction) -> str:
         return str(instruction.argrepr)
     if instruction.arg == 4:
         return "INTRINSIC_ASYNC_GEN_WRAP"
+
     return str(instruction.arg)
 
 
@@ -812,6 +1072,7 @@ def unwrap_async_iterator_call(iterable: ast.expr) -> ast.expr:
         return iterable
     if iterable.func.attr != "__aiter__":
         return iterable
+
     return iterable.func.value
 
 
@@ -821,6 +1082,7 @@ def find_generator_iterator_load(instructions: list[Instruction]) -> int | None:
             continue
         if instruction.argval == ".0":
             return index
+
     return None
 
 
@@ -834,7 +1096,7 @@ def comprehension_target_from_store(
             id=safe_identifier(str(instruction.argval)),
             ctx=ast.Store(),
         )
-    if instruction.opname not in {"UNPACK_SEQUENCE", "UNPACK_TUPLE"}:
+    if instruction.opname != "UNPACK_SEQUENCE":
         return None
 
     targets: list[ast.expr] = []
@@ -847,6 +1109,7 @@ def comprehension_target_from_store(
             "STORE_FAST",
         }:
             return None
+
         targets.append(
             ast.Name(
                 id=safe_identifier(str(instructions[cursor].argval)),
@@ -854,6 +1117,7 @@ def comprehension_target_from_store(
             )
         )
         cursor += 1
+
     return ast.Tuple(elts=targets, ctx=ast.Store())
 
 
@@ -870,9 +1134,11 @@ def find_comprehension_update(
     }.get(code_name)
     if expected is None:
         return None
+
     for index in range(start_index, end_index):
         if instructions[index].opname == expected:
             return index
+
     return None
 
 
@@ -884,6 +1150,7 @@ def find_generator_yield(
     for index in range(start_index, end_index):
         if instructions[index].opname == "YIELD_VALUE":
             return index
+
     return None
 
 
@@ -923,6 +1190,7 @@ def read_nested_generator_loop(
     )
     if nested is None:
         return None
+
     target, store_index = nested
     return make_generator(target=target, iterator=iterator), store_index + 1
 
@@ -940,10 +1208,12 @@ def read_nested_generator_loop_shape(
     )
     if for_iter_index >= yield_index:
         return None
+
     if instructions[for_iter_index].opname == "GET_ITER":
         for_iter_index += 1
         if for_iter_index >= yield_index:
             return None
+
     for_iter = instructions[for_iter_index]
     if for_iter.opname != "FOR_ITER":
         return None
@@ -959,9 +1229,11 @@ def read_nested_generator_loop_shape(
     )
     if store_index >= yield_index:
         return None
+
     target = comprehension_target_from_store(instructions, store_index)
     if target is None:
         return None
+
     return target, store_index
 
 
@@ -975,6 +1247,7 @@ def find_nested_generator_get_iter(
             return index
         if instructions[index].opname in {"FOR_ITER", "YIELD_VALUE"}:
             return None
+
     return None
 
 
@@ -990,6 +1263,7 @@ def read_generator_conditions(
 ) -> tuple[int, list[ast.expr]]:
     cursor = start_index
     conditions: list[ast.expr] = []
+
     for _index in range(16):
         jump_index = find_generator_condition_jump(
             instructions, cursor, yield_index, loop_offset
@@ -1002,19 +1276,23 @@ def read_generator_conditions(
         )
         if condition is None:
             return start_index, []
+
         condition = unwrap_truth_test(condition)
         jump_opname = instructions[jump_index].opname
         condition = condition_from_jump(jump_opname, condition)
+
         if is_backward_condition_jump(instructions[jump_index], loop_offset):
             if not is_false_jump(jump_opname):
                 condition = invert_condition(condition)
+
             conditions.append(condition)
             cursor = jump_index + 1
             continue
+
         if is_false_jump(jump_opname):
             condition = invert_condition(condition)
-        conditions.append(condition)
 
+        conditions.append(condition)
         target_index = offset_to_index.get(int(instructions[jump_index].argval))
         if (
             target_index is None
@@ -1022,7 +1300,9 @@ def read_generator_conditions(
             or target_index > yield_index
         ):
             return start_index, []
+
         cursor = target_index
+
     return start_index, []
 
 
@@ -1038,21 +1318,26 @@ def find_generator_condition_jump(
             return index
         if not is_forward_conditional_jump(instruction):
             continue
+
         next_index = skip_ignorable_instructions(instructions, index + 1, yield_index)
         if next_index >= yield_index:
             return None
+
         next_instruction = instructions[next_index]
-        if next_instruction.opname != "JUMP_BACKWARD":
+        if next_instruction.opname not in LOOP_BACK_JUMPS:
             continue
         if int(next_instruction.argval) != loop_offset:
             continue
+
         return index
+
     return None
 
 
 def is_backward_condition_jump(instruction: Instruction, loop_offset: int) -> bool:
     return (
-        instruction.opname.startswith("POP_JUMP_BACKWARD_IF_")
+        is_conditional_jump_name(instruction.opname)
+        and "OR_POP" not in instruction.opname
         and instruction.argval == loop_offset
     )
 
@@ -1075,6 +1360,7 @@ def evaluate_generator_expression(
     )
     if conditional is not None:
         return conditional
+
     chain = evaluate_compare_chain(
         spawn, code, version, instructions, start_index, end_index
     )
@@ -1091,6 +1377,7 @@ def evaluate_generator_expression(
     )
     if not values:
         return None
+
     return values[-1]
 
 
@@ -1107,6 +1394,7 @@ def evaluate_compare_chain(
         for first, second in pairwise(instructions[start_index:end_index])
     ):
         return None
+
     child = spawn(code)
     value: ast.expr | None = child.evaluate_expression_range(
         instructions, start_index, end_index
@@ -1123,6 +1411,7 @@ def evaluate_conditional_expression(
     end_index: int,
 ) -> ast.IfExp | None:
     offset_to_index = make_offset_index(instructions)
+
     for jump_index in range(start_index, end_index):
         jump = instructions[jump_index]
         if not jump.opname.startswith("POP_JUMP"):
@@ -1135,8 +1424,9 @@ def evaluate_conditional_expression(
         )
         if bridge_index >= end_index:
             continue
+
         bridge = instructions[bridge_index]
-        if bridge.opname not in {"JUMP_FORWARD", "JUMP"}:
+        if bridge.opname not in FORWARD_JUMPS:
             continue
 
         body_start = offset_to_index.get(int(bridge.argval))
@@ -1184,6 +1474,7 @@ def evaluate_conditional_expression(
             return None
 
         return ast.IfExp(test=test, body=body, orelse=orelse)
+
     return None
 
 
@@ -1196,13 +1487,16 @@ def find_conditional_expression_body_end(
 ) -> int | None:
     if body_start >= orelse_start:
         return None
+
     for index in range(body_start, orelse_start):
         instruction = instructions[index]
-        if instruction.opname not in {"JUMP_FORWARD", "JUMP"}:
+        if instruction.opname not in FORWARD_JUMPS:
             continue
+
         target_index = offset_to_index.get(int(instruction.argval))
         if target_index == end_index:
             return index
+
     return None
 
 
@@ -1217,14 +1511,18 @@ def evaluate_expression_stack(
     child = spawn(code)
     starting_depth = len(child.stack)
     pending_conditions: list[ast.expr] = []
+
     for instruction in instructions[start_index:end_index]:
         if run_expression_jump(child, instruction, pending_conditions):
             continue
+
         child.run_instruction(instruction)
+
     merge_expression_jump_conditions(child, pending_conditions)
 
     if len(child.stack) <= starting_depth:
         return []
+
     values = [coerce_expr(value) for value in child.stack[starting_depth:]]
     mark_scope_warnings(values[-1], str(code.co_name), child.warnings)
     return values
@@ -1239,6 +1537,7 @@ def run_expression_jump(
         return False
     if instruction.opname.startswith("POP_JUMP"):
         pending_conditions.append(coerce_expr(decompiler.pop_or_none()))
+
     return True
 
 
@@ -1250,27 +1549,33 @@ def merge_expression_jump_conditions(
         return
 
     current = coerce_expr(decompiler.stack.pop()) if decompiler.stack else None
+
     for condition in reversed(pending_conditions):
         if current is None:
             current = condition
             continue
-        merged = merge_chained_compare(condition, current)
+
+        merged = merge_compare_by_key(condition, current)
         if merged is None:
             if decompiler.stack:
                 decompiler.stack.append(current)
+
             return
+
         current = merged
+
     if current is not None:
         decompiler.stack.append(current)
 
 
-def merge_chained_compare(left: ast.expr, right: ast.expr) -> ast.Compare | None:
+def merge_compare_by_key(left: ast.expr, right: ast.expr) -> ast.Compare | None:
     if not isinstance(left, ast.Compare) or not isinstance(right, ast.Compare):
         return None
     if not left.comparators or len(right.ops) != 1 or len(right.comparators) != 1:
         return None
     if expression_key(left.comparators[-1]) != expression_key(right.left):
         return None
+
     return ast.Compare(
         left=left.left,
         ops=[*left.ops, *right.ops],
@@ -1282,10 +1587,13 @@ def coerce_expr(value: Any) -> ast.expr:
     coerced = coerce_runtime_value(value)
     if coerced is not None:
         return coerced
+
     if isinstance(value, ast.expr):
         if is_code_constant(value):
             return ast.Constant(value=None)
+
         return value
+
     return ast.Constant(value=None)
 
 
@@ -1304,21 +1612,25 @@ def coerce_runtime_value(value: Any) -> ast.expr | None:
             slice=ast.Constant(value=value.index),
             ctx=ast.Load(),
         )
+
     return None
 
 
 def coerce_import_expr(value: ImportValue | ImportedAttributeValue) -> ast.expr:
     if isinstance(value, ImportValue):
         return make_name(value.name.split(".")[0], ast.Load())
+
     return make_name(value.name, ast.Load())
 
 
 def make_type_alias_call_expr(value: TypeAliasValue) -> ast.Call:
     type_params: ast.expr
+
     if value.type_params:
         type_params = ast.Tuple(elts=list(value.type_params), ctx=ast.Load())
     else:
         type_params = ast.Constant(value=None)
+
     return ast.Call(
         func=ast.Name(id="TypeAliasType", ctx=ast.Load()),
         args=[ast.Constant(value=value.name), value.value],
@@ -1327,6 +1639,17 @@ def make_type_alias_call_expr(value: TypeAliasValue) -> ast.Call:
 
 
 SCOPE_WARNINGS_MARK = "_pyc2py_scope_warnings"
+
+
+def decompile_body(spawn: ChildSpawner, code: Any) -> Any:
+    try:
+        return spawn(code).decompile()
+    except Exception as error:
+        reason = type(error).__name__
+        return NativeResult(
+            source=ast.unparse(make_gap(f"recover this body ({reason})")) + "\n",
+            warnings=(f"{MISSING_BODY}: decompiling it raised {reason}",),
+        )
 
 
 def result_warnings(result: Any | None) -> tuple[str, ...]:
@@ -1342,13 +1665,16 @@ def mark_scope_warnings(node: ast.AST, scope: str, warnings: Iterable[str]) -> N
 
 def take_scope_warnings(body: list[ast.stmt]) -> list[str]:
     taken: list[str] = []
+
     for statement in body:
         for node in ast.walk(statement):
             marked = getattr(node, SCOPE_WARNINGS_MARK, None)
             if marked is None:
                 continue
+
             delattr(node, SCOPE_WARNINGS_MARK)
             taken.extend(warning for warning in marked if warning not in taken)
+
     return taken
 
 
@@ -1358,39 +1684,37 @@ def parse_body_or_empty(
 ) -> ast.Module:
     if result is None:
         return ast.Module(body=[], type_ignores=[])
+
+    body = getattr(result, "body", None)
+    if body is not None and result.source is None:
+        return ast.Module(body=list(body), type_ignores=[])
+
     try:
         parsed = ast.parse(result.source)
     except SyntaxError as error:
         if warnings is not None:
             warnings.append(
-                f"recovered body is not valid Python and was dropped: {error.msg}"
+                f"{MISSING_BODY}: the recovered body is not valid Python ({error.msg})"
             )
+
         return ast.Module(body=[], type_ignores=[])
-    body = getattr(result, "body", None)
+
     if body is None:
         return parsed
+
     return ast.Module(body=list(body), type_ignores=[])
 
 
-def is_coroutine_code(code: Any) -> bool:
-    flags = int(getattr(code, "co_flags", 0) or 0)
-    return bool(flags & 0x280)
-
-
-def make_slice(start: Any, stop: Any) -> ast.Slice:
-    lower = none_to_empty(start)
-    upper = none_to_empty(stop)
-    return ast.Slice(lower=lower, upper=upper, step=None)
-
-
-def none_to_empty(value: Any) -> ast.expr | None:
+def slice_bound(value: Any) -> ast.expr | None:
     expr = coerce_expr(value)
     if isinstance(expr, ast.Constant) and expr.value is None:
         return None
+
     return expr
 
 
 def unwrap_lazy_expr(value: ast.expr) -> ast.expr:
     if isinstance(value, ast.Lambda):
         return value.body
+
     return value

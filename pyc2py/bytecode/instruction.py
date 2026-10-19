@@ -21,3 +21,13 @@ class Instruction:
     starts_line: int | None
     is_jump_target: bool
     borrowed: bool = False
+
+
+def is_none_load(instruction: Instruction) -> bool:
+    return instruction.opname in {"LOAD_CONST", "RETURN_CONST"} and (
+        instruction.argval is None
+    )
+
+
+def is_none_return(instruction: Instruction) -> bool:
+    return instruction.opname == "RETURN_CONST" and instruction.argval is None

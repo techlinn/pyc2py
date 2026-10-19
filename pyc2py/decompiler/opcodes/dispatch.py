@@ -3,24 +3,32 @@ import math
 from collections.abc import Mapping
 from typing import Any
 
-from pyc2py.astree import LINE_BREAK_ATTRIBUTE, make_assertion_error_name
+from pyc2py.astree import (
+    LINE_BREAK_ATTRIBUTE,
+    make_assertion_error_name,
+    make_gap,
+    make_name,
+)
 from pyc2py.bytecode.chained_compare import CHAINED_COMPARE_LINK
 from pyc2py.bytecode.instruction import Instruction
-from pyc2py.bytecode.opcode_table import normalized_opcode_name
+from pyc2py.bytecode.opcode_table import is_unknown_opname, normalized_opcode_name
 from pyc2py.bytecode.operand import import_is_lazy
+from pyc2py.bytecode.stack_effect import STORE_OPS
 from pyc2py.decompiler.opcodes.flow import is_jump_op
 from pyc2py.decompiler.opcodes.stack_names import (
     LOAD_OPS,
     NO_VALUE_OPS,
-    STORE_OPS,
-    make_name,
     rotation_count,
 )
 from pyc2py.decompiler.opcodes.values import (
-    BINARY_OPS,
     LEGACY_BINARY_OPS,
     UNARY_OPS,
     make_constant,
+)
+from pyc2py.decompiler.structures import (
+    condition_from_jump,
+    invert_condition,
+    is_false_jump,
 )
 
 
@@ -31,22 +39,45 @@ def dispatch_instruction(decompiler: Any, instruction: Instruction) -> None:
 
     opname = normalized_opcode_name(instruction.opname)
     if is_jump_op(opname):
+        leave: ast.stmt | None = None
+
         if instruction.argval in decompiler.loop_continue_offsets:
-            decompiler.statements.append(ast.Continue())
+            leave = ast.Continue()
+        elif instruction.argval in decompiler.loop_break_offsets:
+            leave = ast.Break()
+
+        if leave is not None:
+            if opname.startswith("POP_JUMP") and decompiler.stack:
+                leave = ast.If(
+                    test=jump_taken_test(opname, decompiler.pop_or_none(), decompiler),
+                    body=[leave],
+                    orelse=[],
+                )
+
+            decompiler.statements.append(leave)
             decompiler.stack.clear()
             return
-        if instruction.argval in decompiler.loop_break_offsets:
-            decompiler.statements.append(ast.Break())
-            decompiler.stack.clear()
-            return
+
         decompiler.warnings.append(
             skipped_opcode_message("control-flow", instruction, opname)
         )
         decompiler.stack.clear()
         return
+
     decompiler.warnings.append(
         skipped_opcode_message("unsupported", instruction, opname)
     )
+
+    if is_unknown_opname(opname):
+        offset = instruction.offset
+        decompiler.statements.append(make_gap(f"read the opcode at {offset}"))
+
+
+def jump_taken_test(opname: str, value: object, decompiler: Any) -> ast.expr:
+    condition = condition_from_jump(
+        opname, decompiler.expression_from_stack_value(value)
+    )
+    return invert_condition(condition) if is_false_jump(opname) else condition
 
 
 def skipped_opcode_message(
@@ -58,12 +89,14 @@ def skipped_opcode_message(
         f"{kind} opcode skipped at {instruction.offset}",
         f"opcode={instruction.opname}",
     ]
+
     if runtime_opname != instruction.opname:
         parts.append(f"runtime={runtime_opname}")
     if instruction.arg is not None:
         parts.append(f"arg={instruction.arg}")
     if instruction.argrepr:
         parts.append(f"argrepr={instruction.argrepr}")
+
     return ": ".join((parts[0], ", ".join(parts[1:])))
 
 
@@ -77,17 +110,21 @@ def dispatch_stack_instruction(decompiler: Any, instruction: Instruction) -> boo
         return True
     if dispatch_int_arg_method(decompiler, opname, instruction.arg, STACK_INT_METHODS):
         return True
+
     if opname in {"ROT_TWO", "ROT_THREE", "ROT_FOUR"}:
         decompiler.rotate_stack(rotation_count(opname))
         return True
+
     return dispatch_end_for(decompiler, opname)
 
 
 def mark_default_line_breaks(decompiler: Any, instruction: Instruction) -> None:
     defaults = decompiler.stack[-1]
     line_breaks = decompiler.line_break_offsets.get(instruction.offset, ())
+
     if not isinstance(defaults, ast.Tuple):
         return
+
     for value, line_break in zip(defaults.elts, line_breaks, strict=False):
         setattr(value, LINE_BREAK_ATTRIBUTE, line_break)
 
@@ -110,24 +147,31 @@ def dispatch_stack_value_instruction(
         )
         mark_default_line_breaks(decompiler, instruction)
         return True
+
     if opname == "LOAD_SMALL_INT":
         decompiler.stack.append(make_constant(int(instruction.argval or 0)))
         return True
+
     if opname == "LOAD_COMMON_CONSTANT":
         decompiler.load_common_constant(instruction.argval)
         return True
+
     if opname == "PUSH_NULL":
         decompiler.stack.append(make_name("NULL", ast.Load()))
         return True
+
     return False
 
 
 def dispatch_end_for(decompiler: Any, opname: str) -> bool:
     if opname != "END_FOR":
         return False
+
     decompiler.pop_or_none()
+
     if decompiler.version is None or decompiler.version < (3, 14):
         decompiler.pop_or_none()
+
     return True
 
 
@@ -137,7 +181,6 @@ def constant_negative_nan_from_previous_inf(
 ) -> bool | None:
     if not isinstance(instruction.argval, float) or not math.isnan(instruction.argval):
         return None
-
     if not isinstance(instruction.arg, int) or instruction.arg < 1:
         return None
 
@@ -148,6 +191,7 @@ def constant_negative_nan_from_previous_inf(
     previous = constants[instruction.arg - 1]
     if not isinstance(previous, float) or not math.isinf(previous):
         return None
+
     return math.copysign(1.0, previous) < 0
 
 
@@ -155,7 +199,6 @@ def dispatch_name_instruction(decompiler: Any, instruction: Instruction) -> bool
     opname = normalized_opcode_name(instruction.opname)
     if dispatch_name_load_instruction(decompiler, instruction, opname):
         return True
-
     if dispatch_str_arg_method(
         decompiler, opname, instruction.argval, NAME_STR_METHODS
     ):
@@ -178,18 +221,23 @@ def dispatch_name_load_instruction(
     if opname == "LOAD_GLOBAL":
         load_global_name(decompiler, instruction)
         return True
+
     if opname in LOAD_OPS:
         load_name(decompiler, instruction.argval)
         line_breaks = decompiler.line_break_offsets.get(instruction.offset)
         if line_breaks is not None:
             setattr(decompiler.stack[-1], LINE_BREAK_ATTRIBUTE, line_breaks[0])
+
         return True
+
     if opname == "LOAD_ASSERTION_ERROR":
         decompiler.stack.append(make_assertion_error_name())
         return True
+
     if opname == "LOAD_BUILD_CLASS":
         decompiler.stack.append(decompiler.build_class_marker())
         return True
+
     return False
 
 
@@ -201,9 +249,11 @@ def dispatch_name_store_delete(
     if opname in STORE_OPS:
         decompiler.store_name(str(instruction.argval), opname)
         return True
+
     if opname in {"DELETE_NAME", "DELETE_GLOBAL", "DELETE_FAST", "DELETE_DEREF"}:
         decompiler.delete_name(str(instruction.argval), opname)
         return True
+
     return False
 
 
@@ -252,6 +302,7 @@ def dispatch_builder_instruction(decompiler: Any, instruction: Instruction) -> b
         decompiler, opname, instruction.arg, BUILDER_ONE_DEFAULT_INT_METHODS, default=1
     ):
         return True
+
     return dispatch_noarg_method(decompiler, opname, BUILDER_NOARG_METHODS)
 
 
@@ -284,36 +335,12 @@ def dispatch_operator_instruction(decompiler: Any, instruction: Instruction) -> 
 
 
 def dispatch_binary_op(decompiler: Any, instruction: Instruction) -> None:
-    symbol = binary_operator_symbol(instruction)
+    symbol = str(instruction.argrepr)
     if symbol == "[]":
         decompiler.binary_subscript()
         return
+
     decompiler.binary_op(symbol)
-
-
-def binary_operator_symbol(instruction: Instruction) -> str:
-    specialized = specialized_binary_operator_symbol(instruction.opname)
-    if specialized is not None:
-        return specialized
-
-    argrepr = str(instruction.argrepr)
-    if argrepr in BINARY_OPS or argrepr.endswith("=") or argrepr == "[]":
-        return argrepr
-    return argrepr
-
-
-def specialized_binary_operator_symbol(opname: str) -> str | None:
-    if opname == "BINARY_OP_EXTEND":
-        return "+="
-    if opname.startswith("BINARY_OP_INPLACE_ADD_"):
-        return "+="
-    if opname.startswith("BINARY_OP_ADD_"):
-        return "+"
-    if opname.startswith("BINARY_OP_MULTIPLY_"):
-        return "*"
-    if opname.startswith("BINARY_OP_SUBTRACT_"):
-        return "-"
-    return None
 
 
 def load_global_name(decompiler: Any, instruction: Instruction) -> None:
@@ -324,24 +351,30 @@ def load_global_name(decompiler: Any, instruction: Instruction) -> None:
     )
     if pushes_null:
         decompiler.stack.append(make_name("NULL", ast.Load()))
+
     if instruction.argval == "AssertionError" and not has_assertion_error_op(
         decompiler.version
     ):
         decompiler.stack.append(make_assertion_error_name())
         return
+
     load_name(decompiler, instruction.argval)
 
 
 def has_assertion_error_op(version: tuple[int, ...] | None) -> bool:
-    # before 3.9 an assert loads the global like any other code would, so the
-    # two cannot be told apart there
+    # before 3.9 an assert loads AssertionError like any global
     return version is not None and version >= (3, 9)
 
 
+# Python 2 loads True and False by name
+NAME_CONSTANTS = {"None": None, "True": True, "False": False}
+
+
 def load_name(decompiler: Any, value: object) -> None:
-    if value == "None":
-        decompiler.stack.append(ast.Constant(value=None))
+    if isinstance(value, str) and value in NAME_CONSTANTS:
+        decompiler.stack.append(ast.Constant(value=NAME_CONSTANTS[value]))
         return
+
     decompiler.stack.append(make_name(str(value), ast.Load()))
 
 
@@ -353,6 +386,7 @@ def dispatch_compare_arg_op(
     symbols = COMPARE_ARG_SYMBOLS.get(opname)
     if symbols is None:
         return False
+
     decompiler.compare_op(symbols[int(arg == 1)])
     return True
 
@@ -389,6 +423,7 @@ def dispatch_import_attr_instruction(decompiler: Any, instruction: Instruction) 
             lazy=import_is_lazy(int(instruction.arg or 0), decompiler.version),
         )
         return True
+
     if dispatch_noarg_method(decompiler, opname, IMPORT_ATTR_NOARG_METHODS):
         return True
     if dispatch_str_arg_method(
@@ -403,7 +438,7 @@ def dispatch_import_attr_instruction(decompiler: Any, instruction: Instruction) 
     if opname == "LOAD_ATTR":
         decompiler.load_attr(
             str(instruction.argval),
-            load_attr_arg_from_instruction(instruction),
+            int(instruction.arg or 0),
         )
         return True
 
@@ -442,10 +477,8 @@ def dispatch_async_yield_print_instruction(
     opname = normalized_opcode_name(instruction.opname)
     if dispatch_noarg_method(decompiler, opname, ASYNC_YIELD_PRINT_NOARG_METHODS):
         return True
-
     if opname == "GET_ITER":
         return True
-
     if opname in {"GET_AWAITABLE", "GET_YIELD_FROM_ITER"}:
         return True
 
@@ -460,6 +493,7 @@ def dispatch_noarg_method(
     method_name = methods.get(opname)
     if method_name is None:
         return False
+
     getattr(decompiler, method_name)()
     return True
 
@@ -473,6 +507,7 @@ def dispatch_str_arg_method(
     method_name = methods.get(opname)
     if method_name is None:
         return False
+
     getattr(decompiler, method_name)(str(value))
     return True
 
@@ -488,6 +523,7 @@ def dispatch_int_arg_method(
     method_name = methods.get(opname)
     if method_name is None:
         return False
+
     getattr(decompiler, method_name)(read_int_arg(value, default))
     return True
 
@@ -501,6 +537,7 @@ def dispatch_opname_int_arg_method(
     method_name = methods.get(opname)
     if method_name is None:
         return False
+
     getattr(decompiler, method_name)(opname, read_int_arg(value, 0))
     return True
 
@@ -512,6 +549,7 @@ def read_int_arg(value: object, default: int) -> int:
         raise TypeError(
             f"opcode argument must be an integer, got {type(value).__name__}"
         )
+
     return value
 
 
@@ -524,6 +562,7 @@ def dispatch_value_arg_method(
     method_name = methods.get(opname)
     if method_name is None:
         return False
+
     getattr(decompiler, method_name)(value)
     return True
 
@@ -537,6 +576,7 @@ def dispatch_instruction_method(
     method_name = methods.get(opname)
     if method_name is None:
         return False
+
     getattr(decompiler, method_name)(instruction)
     return True
 
@@ -550,6 +590,7 @@ def dispatch_opname_prefix_method(
         if opname.startswith(prefix):
             getattr(decompiler, method_name)(opname)
             return True
+
     return False
 
 
@@ -561,16 +602,17 @@ def dispatch_statement_node(
     node_type = nodes.get(opname)
     if node_type is None:
         return False
+
     decompiler.statements.append(node_type())
     return True
 
 
 def super_attr_arg_from_instruction(instruction: Instruction) -> int:
     arg = int(instruction.arg or 0)
+
     if instruction.opname in {
         "LOAD_SUPER_METHOD",
         "LOAD_ZERO_SUPER_METHOD",
-        "LOAD_SUPER_ATTR_METHOD",
     }:
         arg |= 1
     if instruction.opname == "LOAD_SUPER_METHOD":
@@ -578,13 +620,6 @@ def super_attr_arg_from_instruction(instruction: Instruction) -> int:
     if instruction.opname in {"LOAD_ZERO_SUPER_ATTR", "LOAD_ZERO_SUPER_METHOD"}:
         arg &= ~0x02
 
-    return arg
-
-
-def load_attr_arg_from_instruction(instruction: Instruction) -> int:
-    arg = int(instruction.arg or 0)
-    if instruction.opname.startswith("LOAD_ATTR_METHOD_"):
-        return arg | 1
     return arg
 
 
@@ -598,6 +633,7 @@ CALL_OPS = frozenset(
         "CALL_FUNCTION_VAR_KW",
         "CALL_FUNCTION_EX",
         "CALL_METHOD",
+        "CALL_METHOD_KW",
     }
 )
 
@@ -606,9 +642,11 @@ STACK_NOARG_METHODS = {
     "DUP_TOP": "duplicate_top",
     "DUP_TOP_TWO": "duplicate_top_two",
     "GEN_START": "pop_or_none",
+    "BUILD_LIST_FROM_ARG": "push_empty_list_under_top",
 }
 STACK_INT_METHODS = {
     "COPY": "copy_stack_item",
+    "DUP_TOPX": "duplicate_top_items",
     "SWAP": "swap_stack_item",
     "ROT_N": "rotate_stack",
 }
@@ -647,7 +685,6 @@ STATEMENT_NODES = {
 BUILDER_INSTRUCTION_METHODS = {
     "UNPACK_EX": "unpack_sequence",
     "UNPACK_SEQUENCE": "unpack_sequence",
-    "UNPACK_TUPLE": "unpack_sequence",
 }
 BUILDER_OPNAME_INT_METHODS = {
     "BUILD_LIST_UNPACK": "build_sequence_unpack",
@@ -714,6 +751,7 @@ SUBSCRIPT_NOARG_METHODS = {
 SUBSCRIPT_STR_METHODS = {
     "STORE_ATTR": "store_attr",
     "DELETE_ATTR": "delete_attr",
+    "STORE_ANNOTATION": "store_annotation",
 }
 SUBSCRIPT_PREFIX_METHODS = {
     "SLICE+": "legacy_slice",
@@ -740,13 +778,13 @@ FORMAT_CALL_NOARG_METHODS = {
     "FORMAT_SIMPLE": "format_simple",
     "FORMAT_WITH_SPEC": "format_with_spec",
     "BUILD_TEMPLATE": "build_template",
-    "MAKE_CLOSURE": "make_closure",
 }
 FORMAT_CALL_INT_METHODS = {
     "FORMAT_VALUE": "format_value",
     "CONVERT_VALUE": "convert_value",
     "BUILD_INTERPOLATION": "build_interpolation",
     "MAKE_FUNCTION": "make_function",
+    "MAKE_CLOSURE": "make_closure",
     "SET_FUNCTION_ATTRIBUTE": "set_function_attribute",
 }
 FORMAT_CALL_INSTRUCTION_METHODS = {

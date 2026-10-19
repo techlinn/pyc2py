@@ -1,6 +1,11 @@
 from typing import Any
 
-from pyc2py.bytecode.opcode_table import normalized_opcode_name
+from pyc2py.bytecode.formats import releases
+from pyc2py.bytecode.opcode_table import (
+    normalized_opcode_name,
+    resolve_supported_version,
+)
+from pyc2py.types import is_tuple
 
 ARG_NOT_RESOLVED = object()
 
@@ -63,23 +68,6 @@ BINARY_OP_SYMBOLS = (
 )
 
 CONVERT_VALUE_NAMES = ("", "str", "repr", "ascii")
-COMMON_CONSTANTS_3_14 = (
-    "AssertionError",
-    "NotImplementedError",
-    "tuple",
-    "all",
-    "any",
-)
-COMMON_CONSTANTS_3_15 = (
-    *COMMON_CONSTANTS_3_14,
-    "list",
-    "set",
-    None,
-    "",
-    True,
-    False,
-    -1,
-)
 INTRINSIC_1_NAMES = (
     "INTRINSIC_1_INVALID",
     "INTRINSIC_PRINT",
@@ -93,6 +81,7 @@ INTRINSIC_1_NAMES = (
     "INTRINSIC_TYPEVARTUPLE",
     "INTRINSIC_SUBSCRIPT_GENERIC",
     "INTRINSIC_TYPEALIAS",
+    "INTRINSIC_BUILD_FROZENSET",
 )
 INTRINSIC_2_NAMES = (
     "INTRINSIC_2_INVALID",
@@ -101,6 +90,8 @@ INTRINSIC_2_NAMES = (
     "INTRINSIC_TYPEVAR_WITH_CONSTRAINTS",
     "INTRINSIC_SET_FUNCTION_TYPE_PARAMS",
     "INTRINSIC_SET_TYPEPARAM_DEFAULT",
+    "INTRINSIC_ADD_CONDITIONAL_ANNOTATION",
+    "INTRINSIC_MATCH_CLASS_ISINSTANCE",
 )
 SPECIAL_INDEXED_ARG_VALUES = {
     "BINARY_OP": BINARY_OP_SYMBOLS,
@@ -119,7 +110,6 @@ def resolve_arg_value(
     offset: int,
     version: tuple[int, ...],
 ) -> Any:
-
     if arg is None:
         return None
 
@@ -157,6 +147,7 @@ def resolve_indexed_arg(
         return read_indexed(free_names(code, version), arg)
     if opcode in getattr(opcode_table, "hascompare", ()):
         return read_indexed(COMPARE_SYMBOLS, compare_index(arg, version))
+
     return ARG_NOT_RESOLVED
 
 
@@ -168,17 +159,17 @@ def resolve_special_arg(
     offset: int,
     version: tuple[int, ...],
 ) -> Any:
-    if version[:2] == (3, 12) and raw_opname in WORDCODE_SUPERINSTRUCTIONS:
-        return superinstruction_values(code, offset, raw_opname, arg)
     if normalized_opname in PACKED_LOCAL_OPS:
         return packed_local_names(getattr(code, "co_varnames", ()), arg)
     if normalized_opname == "LOAD_COMMON_CONSTANT":
         return read_indexed(common_constants(version), arg)
     if normalized_opname == "LOAD_SMALL_INT":
         return arg
+
     values = SPECIAL_INDEXED_ARG_VALUES.get(normalized_opname)
     if values is None:
         return ARG_NOT_RESOLVED
+
     return read_indexed(values, arg)
 
 
@@ -194,27 +185,19 @@ def resolve_jump_arg(
         return relative_target(opname, offset, arg, version)
     if opcode in getattr(opcode_table, "hasjabs", ()):
         return absolute_target(arg, version)
+
     return arg
 
 
 def read_indexed(values: Any, index: int) -> Any:
     if index < 0:
         return index
+
     try:
         return values[index]
     except (IndexError, TypeError):
         return index
 
-
-WORDCODE_SUPERINSTRUCTIONS = frozenset(
-    {
-        "LOAD_CONST__LOAD_FAST",
-        "LOAD_FAST__LOAD_CONST",
-        "LOAD_FAST__LOAD_FAST",
-        "STORE_FAST__LOAD_FAST",
-        "STORE_FAST__STORE_FAST",
-    }
-)
 
 PACKED_LOCAL_OPS = frozenset(
     {
@@ -224,33 +207,6 @@ PACKED_LOCAL_OPS = frozenset(
         "STORE_FAST_STORE_FAST",
     }
 )
-
-
-def superinstruction_values(
-    code: Any,
-    offset: int,
-    opname: str,
-    first_arg: int,
-) -> tuple[Any, Any]:
-    second_arg = following_wordcode_arg(code, offset)
-    if second_arg is None:
-        return first_arg, first_arg
-
-    consts = getattr(code, "co_consts", ())
-    varnames = getattr(code, "co_varnames", ())
-    if opname == "LOAD_CONST__LOAD_FAST":
-        return read_indexed(consts, first_arg), read_indexed(varnames, second_arg)
-    if opname == "LOAD_FAST__LOAD_CONST":
-        return read_indexed(varnames, first_arg), read_indexed(consts, second_arg)
-    return read_indexed(varnames, first_arg), read_indexed(varnames, second_arg)
-
-
-def following_wordcode_arg(code: Any, offset: int) -> int | None:
-    code_bytes = bytes(getattr(code, "co_code", b"") or b"")
-    next_arg_offset = offset + 3
-    if next_arg_offset >= len(code_bytes):
-        return None
-    return code_bytes[next_arg_offset]
 
 
 def packed_local_names(values: Any, arg: int) -> tuple[Any, Any]:
@@ -265,10 +221,8 @@ def packed_local_indexes(arg: int) -> tuple[int, int]:
     return arg >> 4, arg & 0x0F
 
 
-def common_constants(version: tuple[int, ...]) -> tuple[Any, ...]:
-    if version >= (3, 15):
-        return COMMON_CONSTANTS_3_15
-    return COMMON_CONSTANTS_3_14
+def common_constants(version: tuple[int, ...]) -> tuple[object, ...]:
+    return releases()[resolve_supported_version(version)].common_constants
 
 
 def free_names(
@@ -279,38 +233,37 @@ def free_names(
         names = tuple(getattr(code, "co_localsplusnames", ()) or ())
         if names:
             return names
+
         return (
             *tuple(getattr(code, "co_varnames", ()) or ()),
             *tuple(getattr(code, "co_cellvars", ()) or ()),
             *tuple(getattr(code, "co_freevars", ()) or ()),
         )
+
     return tuple(getattr(code, "co_cellvars", ()) or ()) + tuple(
         getattr(code, "co_freevars", ()) or ()
     )
 
 
 def local_names(code: Any, version: tuple[int, ...] | None = None) -> tuple[Any, ...]:
-    # python 3.11+ numbers locals, cells and free variables in one table, and
-    # 3.13 loads a cell with LOAD_FAST, so the index can point past co_varnames
+    # 3.11+ numbers locals, cells and frees together, past co_varnames
     if version is not None and version >= (3, 11):
         return free_names(code, version)
+
     return tuple(getattr(code, "co_varnames", ()) or ())
 
 
 def name_index(opname: str, arg: int, version: tuple[int, ...]) -> int:
     opname = normalized_opcode_name(opname)
-
     if version >= (3, 11) and opname == "LOAD_GLOBAL":
         return arg >> 1
-
     if version >= (3, 12) and opname == "LOAD_ATTR":
         return arg >> 1
-
     if version >= (3, 12) and opname == "LOAD_SUPER_ATTR":
         return arg >> 2
-
     if version >= (3, 15) and opname == "IMPORT_NAME":
         return arg >> 2
+
     return arg
 
 
@@ -323,12 +276,14 @@ def compare_index(arg: int, version: tuple[int, ...]) -> int:
         return arg >> 5
     if version >= (3, 12):
         return arg >> 4
+
     return arg
 
 
 def absolute_target(arg: int, version: tuple[int, ...]) -> int:
     if version >= (3, 10):
         return arg * 2
+
     return arg
 
 
@@ -341,15 +296,21 @@ def relative_target(
     )
     base_offset = offset + instruction_size(version) + cache_width
 
-    if version >= (3, 11) and "BACKWARD" in opname:
+    if version >= (3, 11) and is_backward_jump(opname, version):
         return base_offset - arg * instruction_size(version)
-
     if version >= (3, 10):
         return base_offset + arg * instruction_size(version)
-
     if version >= (3, 6):
         return offset + 2 + arg
+
     return offset + 3 + arg
+
+
+def is_backward_jump(opname: str, version: tuple[int, ...]) -> bool:
+    if "BACKWARD" in opname:
+        return True
+
+    return version >= (3, 14) and normalized_opcode_name(opname) == "END_ASYNC_FOR"
 
 
 def inline_cache_entries(opname: str, version: tuple[int, ...]) -> int:
@@ -359,7 +320,6 @@ def inline_cache_entries(opname: str, version: tuple[int, ...]) -> int:
     normalized_opname = normalized_opcode_name(opname)
     if normalized_opname in {"FOR_ITER", "SEND"}:
         return 1
-
     if version >= (3, 13) and normalized_opname in {
         "JUMP_BACKWARD",
         "POP_JUMP_IF_FALSE",
@@ -368,6 +328,7 @@ def inline_cache_entries(opname: str, version: tuple[int, ...]) -> int:
         "POP_JUMP_IF_TRUE",
     }:
         return 1
+
     return 0
 
 
@@ -376,7 +337,6 @@ def format_argrepr(opname: str, argval: Any) -> str:
         return ""
 
     normalized_opname = normalized_opcode_name(opname)
-
     if normalized_opname in {"LOAD_CONST", "RETURN_CONST"}:
         return repr(argval)
 
@@ -388,8 +348,9 @@ def format_argrepr(opname: str, argval: Any) -> str:
         "STORE_FAST_LOAD_FAST",
         "STORE_FAST_STORE_FAST",
     }:
-        if isinstance(argval, tuple) and len(argval) == 2:
+        if is_tuple(argval) and len(argval) == 2:
             return f"{argval[0]}, {argval[1]}"
+
         return str(argval)
 
     if "JUMP" in normalized_opname or normalized_opname in {

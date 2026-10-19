@@ -1,41 +1,10 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import cache
-from importlib import import_module
+
+from pyc2py.bytecode.formats import pypy_format, releases
 
 HAVE_ARGUMENT = 90
-SUPPORTED_VERSIONS = (
-    (1, 0),
-    (1, 1),
-    (1, 2),
-    (1, 3),
-    (1, 4),
-    (1, 5),
-    (1, 6),
-    (2, 0),
-    (2, 1),
-    (2, 2),
-    (2, 3),
-    (2, 4),
-    (2, 5),
-    (2, 6),
-    (2, 7),
-    (3, 0),
-    (3, 1),
-    (3, 2),
-    (3, 3),
-    (3, 4),
-    (3, 5),
-    (3, 6),
-    (3, 7),
-    (3, 8),
-    (3, 9),
-    (3, 10),
-    (3, 11),
-    (3, 12),
-    (3, 13),
-    (3, 14),
-    (3, 15),
-)
+SUPPORTED_VERSIONS = tuple(releases())
 
 CONST_OPS = {"LOAD_CONST", "RETURN_CONST", "KW_NAMES"}
 NAME_OPS = {
@@ -50,6 +19,9 @@ NAME_OPS = {
     "LOAD_METHOD",
     "LOAD_SUPER_ATTR",
     "LOAD_NAME",
+    # PyPy's
+    "LOOKUP_METHOD",
+    "STORE_ANNOTATION",
     "STORE_ATTR",
     "STORE_GLOBAL",
     "STORE_NAME",
@@ -99,7 +71,6 @@ ARG_OPS = {
     "DELETE_NAME",
     "DICT_MERGE",
     "DICT_UPDATE",
-    "ENTER_EXECUTOR",
     "EXTENDED_ARG",
     "FOR_ITER",
     "GEN_START",
@@ -169,54 +140,9 @@ PSEUDO_OPCODE_ALIASES = {
     "SETUP_CLEANUP": "SETUP_FINALLY",
     "STORE_FAST_MAYBE_NULL": "STORE_FAST",
 }
-CANONICAL_CALL_OPS = {
-    "CALL",
-    "CALL_FUNCTION",
-    "CALL_FUNCTION_EX",
-    "CALL_FUNCTION_KW",
-    "CALL_FUNCTION_VAR",
-    "CALL_FUNCTION_VAR_KW",
-    "CALL_KW",
-    "CALL_METHOD",
-}
-NORMALIZED_OPCODE_NAMES = {
-    "CALL_FINALLY": "CALL_FINALLY",
-    "JUMP_BACKWARD_NO_INTERRUPT": "JUMP_BACKWARD_NO_INTERRUPT",
-    "INSTRUMENTED_INSTRUCTION": "NOP",
-    "INSTRUMENTED_LINE": "NOP",
-    "LOAD_CONST__LOAD_FAST": "LOAD_CONST_LOAD_FAST",
-    "LOAD_FAST__LOAD_CONST": "LOAD_FAST_LOAD_CONST",
-    "LOAD_FAST__LOAD_FAST": "LOAD_FAST_LOAD_FAST",
-    "STORE_FAST__LOAD_FAST": "STORE_FAST_LOAD_FAST",
-    "STORE_FAST__STORE_FAST": "STORE_FAST_STORE_FAST",
-}
-NORMALIZED_OPCODE_PREFIXES = (
-    ("BINARY_OP_SUBSCR_", "BINARY_SUBSCR"),
-    ("BINARY_OP_", "BINARY_OP"),
-    ("BINARY_SUBSCR_", "BINARY_SUBSCR"),
-    ("CALL_EX_", "CALL_FUNCTION_EX"),
-    ("CALL_KW_", "CALL_KW"),
-    ("CALL_", "CALL"),
-    ("COMPARE_OP_", "COMPARE_OP"),
-    ("CONTAINS_OP_", "CONTAINS_OP"),
-    ("FOR_ITER_", "FOR_ITER"),
-    ("GET_ITER_", "GET_ITER"),
-    ("JUMP_BACKWARD_", "JUMP_BACKWARD"),
-    ("LOAD_ATTR_", "LOAD_ATTR"),
-    ("LOAD_CONST_", "LOAD_CONST"),
-    ("LOAD_GLOBAL_", "LOAD_GLOBAL"),
-    ("LOAD_SUPER_ATTR_", "LOAD_SUPER_ATTR"),
-    ("RESUME_CHECK", "RESUME"),
-    ("SEND_", "SEND"),
-    ("STORE_ATTR_", "STORE_ATTR"),
-    ("STORE_SUBSCR_", "STORE_SUBSCR"),
-    ("TO_BOOL_", "TO_BOOL"),
-    ("UNPACK_SEQUENCE_", "UNPACK_SEQUENCE"),
-)
 RELATIVE_JUMPS = {
     "CALL_FINALLY",
     "FOR_ITER",
-    "FOR_LOOP",
     "JUMP_BACKWARD",
     "JUMP_BACKWARD_NO_INTERRUPT",
     "JUMP_FORWARD",
@@ -262,17 +188,33 @@ class OpcodeTable:
     hasarg: frozenset[int]
     hasjrel: frozenset[int]
     hasjabs: frozenset[int]
+    # the CPython version whose argument and jump rules the bytes follow
+    layout: tuple[int, int]
 
 
-def get_opcode_table(version: tuple[int, ...]) -> OpcodeTable:
+def get_opcode_table(version: tuple[int, ...], opcodes: str = "") -> OpcodeTable:
+    # opcodes: the module of a compiler that is not CPython's, such as PyPy's
+    if opcodes:
+        return cached_format_table(opcodes)
+
     return cached_opcode_table(resolve_supported_version(version))
 
 
 @cache
-def cached_opcode_table(resolved_version: tuple[int, int]) -> OpcodeTable:
-    module = import_module(version_module_name(resolved_version))
+def cached_format_table(opcodes: str) -> OpcodeTable:
+    found = pypy_format(opcodes)
+    table = build_opcode_table(found.opmap, found.layout)
+    return replace(
+        table,
+        hasarg=table.hasarg | opcodes_named(found.opmap, set(found.argument_ops)),
+        hasjrel=opcodes_named(found.opmap, set(found.relative_jumps)),
+        hasjabs=opcodes_named(found.opmap, set(found.absolute_jumps)),
+    )
 
-    return build_opcode_table(module.OPMAP, resolved_version)
+
+@cache
+def cached_opcode_table(resolved_version: tuple[int, int]) -> OpcodeTable:
+    return build_opcode_table(releases()[resolved_version].opmap, resolved_version)
 
 
 def build_opcode_table(
@@ -280,7 +222,6 @@ def build_opcode_table(
     version: tuple[int, int] | None = None,
 ) -> OpcodeTable:
     resolved_version = version or (0, 0)
-
     return OpcodeTable(
         opname=make_opname(opmap),
         HAVE_ARGUMENT=HAVE_ARGUMENT,
@@ -292,6 +233,7 @@ def build_opcode_table(
         hasarg=argument_opcodes(opmap, resolved_version),
         hasjrel=opcodes_named(opmap, relative_jump_names(resolved_version)),
         hasjabs=opcodes_named(opmap, absolute_jump_names(resolved_version)),
+        layout=resolved_version,
     )
 
 
@@ -322,6 +264,7 @@ def version_resolution_warning(version: tuple[int, ...]) -> str | None:
 def normalize_version(version: tuple[int, ...]) -> tuple[int, int]:
     if len(version) < 2:
         raise ValueError("bytecode version must include major and minor")
+
     return int(version[0]), int(version[1])
 
 
@@ -329,12 +272,9 @@ def format_version(version: tuple[int, int]) -> str:
     return f"{version[0]}.{version[1]}"
 
 
-def version_module_name(version: tuple[int, int]) -> str:
-    return f"pyc2py.bytecode.versions.python_{version[0]}_{version[1]}"
-
-
 def make_opname(opmap: dict[int, str]) -> tuple[str, ...]:
     result = [f"<{opcode}>" for opcode in range(256)]
+
     for opcode, name in opmap.items():
         if 0 <= opcode < len(result):
             result[opcode] = name
@@ -355,6 +295,7 @@ def argument_opcodes(opmap: dict[int, str], version: tuple[int, int]) -> frozens
         return frozenset(opcode for opcode in opmap if opcode >= HAVE_ARGUMENT)
 
     arg_ops = argument_opcode_names(version)
+
     if version < (3, 13):
         return frozenset(
             opcode
@@ -371,54 +312,46 @@ def argument_opcodes(opmap: dict[int, str], version: tuple[int, int]) -> frozens
 
 def argument_opcode_names(version: tuple[int, int]) -> set[str]:
     names = set(ARG_OPS)
+
     if version >= (3, 13):
         names.add("RESUME")
         names.discard("MAKE_FUNCTION")
+
     if version >= (3, 14):
         names.add("END_ASYNC_FOR")
         names.discard("CALL_FUNCTION_EX")
+
     if version >= (3, 15):
         names.add("GET_ITER")
 
     return names
 
 
+@cache
 def normalized_opcode_name(name: str) -> str:
-    normalized_name = NORMALIZED_OPCODE_NAMES.get(name)
     alias = PSEUDO_OPCODE_ALIASES.get(name)
-    if normalized_name is None and alias is not None:
-        normalized_name = normalized_opcode_name(alias)
-    elif normalized_name is None and name.startswith("INSTRUMENTED_"):
-        normalized_name = normalized_opcode_name(name[len("INSTRUMENTED_") :])
-    elif normalized_name is None and name.endswith("_A"):
+    if alias is not None:
+        return normalized_opcode_name(alias)
+
+    if name.endswith("_A"):
         base_name = name[:-2]
         normalized_base = normalized_opcode_name(base_name)
         if base_name in A_SUFFIX_OPS or normalized_base in A_SUFFIX_OPS:
-            normalized_name = normalized_base
-    elif normalized_name is None and (
-        name.startswith("CALL_INTRINSIC_") or name in CANONICAL_CALL_OPS
-    ):
-        normalized_name = name
-    elif normalized_name is None and name.startswith("POP_JUMP_FORWARD_"):
-        normalized_name = "POP_JUMP_" + name.removeprefix("POP_JUMP_FORWARD_")
-    elif normalized_name is None and name.startswith("POP_JUMP_BACKWARD_"):
-        normalized_name = "POP_JUMP_" + name.removeprefix("POP_JUMP_BACKWARD_")
+            return normalized_base
 
-    if normalized_name is None:
-        normalized_name = prefixed_opcode_name(name)
+    if name.startswith("POP_JUMP_FORWARD_"):
+        return "POP_JUMP_" + name.removeprefix("POP_JUMP_FORWARD_")
+    if name.startswith("POP_JUMP_BACKWARD_"):
+        return "POP_JUMP_" + name.removeprefix("POP_JUMP_BACKWARD_")
 
-    return normalized_name
-
-
-def prefixed_opcode_name(name: str) -> str:
-    for prefix, opcode_name in NORMALIZED_OPCODE_PREFIXES:
-        if name.startswith(prefix):
-            return opcode_name
     return name
 
 
 def relative_jump_names(version: tuple[int, int]) -> set[str]:
     names = set(RELATIVE_JUMPS)
+
+    if version >= (3, 14):
+        names.add("END_ASYNC_FOR")
     if version >= (3, 11):
         names.update(
             {
@@ -436,6 +369,7 @@ def relative_jump_names(version: tuple[int, int]) -> set[str]:
 
 def absolute_jump_names(version: tuple[int, int]) -> set[str]:
     names = set(ABSOLUTE_JUMPS)
+
     if version >= (3, 11):
         names.discard("JUMP_IF_FALSE_OR_POP")
         names.discard("JUMP_IF_TRUE_OR_POP")
@@ -443,3 +377,18 @@ def absolute_jump_names(version: tuple[int, int]) -> set[str]:
         names.discard("POP_JUMP_IF_TRUE")
 
     return names
+
+
+def is_jump_opname(opname: str) -> bool:
+    return "JUMP" in opname or opname in {"FOR_ITER", "CONTINUE_LOOP"}
+
+
+def is_unknown_opname(opname: str) -> bool:
+    return opname.startswith("<") and opname.endswith(">")
+
+
+# unconditional jumps by the way they can go
+FORWARD_JUMPS = frozenset({"JUMP", "JUMP_FORWARD"})
+BACKWARD_JUMPS = frozenset({"JUMP_BACKWARD", "JUMP_BACKWARD_NO_INTERRUPT"})
+# before 3.11 a jump back to a loop's head is JUMP_ABSOLUTE
+LOOP_BACK_JUMPS = frozenset({"JUMP_BACKWARD", "JUMP_ABSOLUTE"})

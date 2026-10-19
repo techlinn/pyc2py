@@ -5,3 +5,7 @@
 *.txt text eol=lf
 
 *.pyc binary
+
+# developer material stays out of download archives
+UPGRADE.md export-ignore
+.github/ export-ignore

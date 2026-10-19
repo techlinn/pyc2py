@@ -1,4 +1,5 @@
 import ast
+import builtins
 import importlib.util
 import py_compile
 import sys
@@ -9,7 +10,7 @@ from pathlib import Path
 from pyc2py.bytecode.operand import import_is_lazy
 from pyc2py.decompiler.opcodes.values import make_constant
 from pyc2py.pipeline import decompile_file_to_path
-from pyc2py.pyc.magic import find_known_version
+from pyc2py.pyc.magic import MAGIC_VERSION_MAP
 
 
 def decompile_source(source: str) -> str:
@@ -30,14 +31,12 @@ def assert_round_trip(test_case: unittest.TestCase, source: str) -> None:
 
 class MagicNumberTests(unittest.TestCase):
     def test_known_magic_numbers_map_to_their_versions(self) -> None:
-        self.assertEqual(find_known_version(3627), (3, 14))
-        self.assertEqual(find_known_version(3666), (3, 15))
+        self.assertEqual(MAGIC_VERSION_MAP.get(3627), (3, 14))
+        self.assertEqual(MAGIC_VERSION_MAP.get(3666), (3, 15))
 
     def test_running_interpreter_magic_is_known(self) -> None:
-        if sys.version_info[:2] < (3, 12):
-            self.skipTest("magic table covers 3.12 and newer")
         magic = int.from_bytes(importlib.util.MAGIC_NUMBER[:2], "little")
-        self.assertEqual(find_known_version(magic), sys.version_info[:2])
+        self.assertEqual(MAGIC_VERSION_MAP.get(magic), sys.version_info[:2])
 
 
 class ImportLazyFlagTests(unittest.TestCase):
@@ -88,6 +87,7 @@ class ComprehensionUnpackingTests(unittest.TestCase):
 @unittest.skipUnless(sys.version_info[:2] == (3, 15), "frozendict is a 3.15 builtin")
 class FrozenDictConstantTests(unittest.TestCase):
     def test_frozendict_constant_renders_as_a_call(self) -> None:
+        frozendict = vars(builtins)["frozendict"]
         rendered = ast.unparse(make_constant(frozendict({"a": 1, "b": 2})))
         self.assertEqual(rendered, "frozendict({'a': 1, 'b': 2})")
 

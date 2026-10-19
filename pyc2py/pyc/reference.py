@@ -9,7 +9,7 @@ TYPE_REF = ord("r")
 
 @dataclass(slots=True)
 class ReferenceTable:
-    values: list[Any] = field(default_factory=list)
+    values: list[Any] = field(default_factory=list[Any])
     max_values: int = MAX_MARSHAL_OBJECTS
 
     def reserve(self, enabled: bool) -> int | None:
@@ -24,12 +24,14 @@ class ReferenceTable:
         if enabled:
             self.check_capacity()
             self.values.append(value)
+
         return value
 
     def set_reserved(self, index: int | None, value: Any) -> Any:
         if index is not None:
             if index < 0 or index >= len(self.values):
                 raise ValueError("marshal reference reservation is invalid")
+
             self.values[index] = value
 
         return value

@@ -7,8 +7,15 @@ from pyc2py.bytecode.instruction import Instruction
 from pyc2py.bytecode.metadata import (
     line_in_effect,
     make_offset_index,
+    opnames_in,
+    previous_non_metadata_index,
     skip_ignorable_instructions,
 )
+from pyc2py.bytecode.opcode_table import (
+    BACKWARD_JUMPS,
+    LOOP_BACK_JUMPS,
+)
+from pyc2py.bytecode.stack_effect import STORE_OPS
 from pyc2py.decompiler.async_structures import (
     AsyncForLoopPattern,
     find_async_for_loop_pattern,
@@ -17,25 +24,25 @@ from pyc2py.decompiler.async_structures import (
 from pyc2py.decompiler.control_comprehension import (
     INLINE_CLEANUP_OPS,
     ControlComprehensionRecoveryMixin,
+    is_loop_back_jump,
 )
 from pyc2py.decompiler.exception_structures import (
+    enclosing_handler,
     handler_break_return_end,
     handler_break_target,
+    handler_regions,
     out_of_line_handlers_end,
     out_of_line_handlers_start,
     read_table_spans,
-    same_instruction_behavior,
+    same_instruction_run,
     while_handler_break_target,
 )
 from pyc2py.decompiler.opcodes.flow import is_jump_op, is_terminal_op
-from pyc2py.decompiler.opcodes.stack_names import STORE_OPS
-from pyc2py.decompiler.opcodes.values import is_zero_constant
 from pyc2py.decompiler.runtime import coerce_expr, unpack_counts
 from pyc2py.decompiler.structures import (
     ForLoopPattern,
     find_detached_for_tail,
     find_for_loop_pattern,
-    find_legacy_for_loop_pattern,
     invert_condition,
     is_false_jump,
     is_forward_conditional_jump,
@@ -64,6 +71,13 @@ class ControlLoopRecoveryMixin(ControlComprehensionRecoveryMixin, ABC):
             and instructions[cursor].opname != "NOP"
         ):
             return None
+        # under SETUP_LOOP a nested loop has its own SETUP_LOOP
+        if (
+            "SETUP_LOOP" in opnames_in(instructions)
+            and instructions[cursor].offset in self.loop_continue_offsets
+        ):
+            return None
+
         loop_end_index = endless_loop_end(self.code, instructions, cursor, end_index)
         back_jump_index = previous_non_metadata_index(instructions, loop_end_index - 1)
         if back_jump_index is None or back_jump_index <= cursor:
@@ -75,6 +89,7 @@ class ControlLoopRecoveryMixin(ControlComprehensionRecoveryMixin, ABC):
         )
         if inner_loop_end is not None:
             back_jump_index = inner_loop_end
+
             if inner_loop_end < loop_end_index:
                 end_index = inner_loop_end
         elif (
@@ -84,17 +99,31 @@ class ControlLoopRecoveryMixin(ControlComprehensionRecoveryMixin, ABC):
             if continued_only_from_handlers(
                 self.code, instructions, cursor, loop_end_index, end_index
             ):
+                tails = tails_below_loop(
+                    instructions,
+                    cursor,
+                    end_index,
+                    find_inlined_break_tails(
+                        instructions, cursor, loop_end_index, "NOP"
+                    ),
+                )
                 body = self.translate_loop_child_statements(
                     instructions,
                     cursor,
                     loop_end_index,
                     continue_offset=int(instructions[cursor].offset),
                     break_index=end_index,
+                    inlined_break_tails=tails,
                 )
                 self.statements.append(
                     make_endless_while(body, instructions[cursor].offset)
                 )
+                self.append_detached_break_tail(
+                    instructions,
+                    LoopBreakExit(inlined_tails=tails, tail_is_detached=bool(tails)),
+                )
                 return end_index
+
             return self.try_translate_infinite_while_before_code(
                 instructions,
                 cursor,
@@ -108,8 +137,10 @@ class ControlLoopRecoveryMixin(ControlComprehensionRecoveryMixin, ABC):
             "NOP",
         )
         continue_index = cursor
+
         if cursor > 0 and instructions[cursor - 1].opname == "NOP":
             continue_index = cursor - 1
+
         body = self.translate_loop_child_statements(
             instructions,
             self.infinite_body_start(instructions, cursor),
@@ -120,6 +151,7 @@ class ControlLoopRecoveryMixin(ControlComprehensionRecoveryMixin, ABC):
         )
         if continue_index != cursor and body and isinstance(body[-1], ast.Continue):
             body.pop()
+
         self.statements.append(
             make_endless_while(body or [ast.Pass()], instructions[cursor].offset)
         )
@@ -139,6 +171,7 @@ class ControlLoopRecoveryMixin(ControlComprehensionRecoveryMixin, ABC):
     ) -> bool:
         if self.version is None or self.version < (3, 14):
             return False
+
         return any(
             "JUMP" in instruction.opname
             and instruction.argval in self.loop_continue_offsets
@@ -151,12 +184,10 @@ class ControlLoopRecoveryMixin(ControlComprehensionRecoveryMixin, ABC):
         cursor: int,
         last_index: int,
     ) -> int | None:
-        # python 3.14: "while True" whose last statement is another loop. the
-        # last jump back goes to that loop, and one further up (where the
-        # inner loop is left) goes back to this one. behind the last jump
-        # there can be the end of the inner body, when that returns
+        # 3.14 while True ending in a loop: its last jump back goes to that loop
         if self.version is None or self.version < (3, 14):
             return None
+
         start = instructions[cursor].offset
         inner_jump = next(
             (
@@ -175,6 +206,7 @@ class ControlLoopRecoveryMixin(ControlComprehensionRecoveryMixin, ABC):
             for instruction in instructions[cursor:inner_jump]
         ):
             return None
+
         behind = {
             item.offset: index
             for index, item in enumerate(instructions[: last_index + 1])
@@ -195,6 +227,7 @@ class ControlLoopRecoveryMixin(ControlComprehensionRecoveryMixin, ABC):
             instructions[body_end - 1].opname
         ):
             return None
+
         return body_end
 
     def infinite_body_start(self, instructions: list[Instruction], cursor: int) -> int:
@@ -204,6 +237,7 @@ class ControlLoopRecoveryMixin(ControlComprehensionRecoveryMixin, ABC):
             and instructions[cursor].opname == "NOP"
         ):
             return cursor + 1
+
         return cursor
 
     def try_translate_infinite_while_before_code(
@@ -217,6 +251,9 @@ class ControlLoopRecoveryMixin(ControlComprehensionRecoveryMixin, ABC):
             return None
         if starts_with_leaving_test(instructions, cursor, back_jump_index):
             return None
+        if resumes_behind_earlier_try(self.code, instructions, cursor, back_jump_index):
+            return None
+
         tail_end_index = tail_behind_written_continue(
             instructions, cursor, back_jump_index, end_index
         )
@@ -232,18 +269,23 @@ class ControlLoopRecoveryMixin(ControlComprehensionRecoveryMixin, ABC):
                 make_endless_while(body, instructions[cursor].offset)
             )
             return tail_end_index
+
         exit_index = out_of_line_handlers_end(
             self.code, instructions, back_jump_index + 1
         )
+
         if self.leaves_to_enclosing_loop(instructions, cursor, back_jump_index):
             exit_index = back_jump_index = end_index
         elif not loop_exit_is_break_target(
             instructions, cursor, back_jump_index, exit_index, end_index
         ):
             return None
+
         continue_index = cursor
+
         if cursor > 0 and instructions[cursor - 1].opname == "NOP":
             continue_index = cursor - 1
+
         body = self.translate_loop_child_statements(
             instructions,
             self.infinite_body_start(instructions, cursor),
@@ -253,6 +295,7 @@ class ControlLoopRecoveryMixin(ControlComprehensionRecoveryMixin, ABC):
         )
         if continue_index != cursor and body and isinstance(body[-1], ast.Continue):
             body.pop()
+
         self.statements.append(
             make_endless_while(body or [ast.Pass()], instructions[cursor].offset)
         )
@@ -278,6 +321,184 @@ class ControlLoopRecoveryMixin(ControlComprehensionRecoveryMixin, ABC):
         if wrapped_for is not None:
             return wrapped_for
 
+        loop_end_index = offset_to_index.get(int(instruction.argval))
+        read = self.read_block_while(
+            instructions, offset_to_index, cursor, loop_end_index or end_index
+        ) or self.read_first_test_while(
+            instructions, offset_to_index, cursor, end_index
+        )
+        if read is None:
+            if loop_end_index is None or loop_end_index > end_index:
+                return None
+
+            return self.try_translate_endless_block_while(
+                instructions, cursor + 1, loop_end_index
+            )
+
+        test, body_start, false_index = read
+        body = self.translate_loop_child_statements(
+            instructions,
+            body_start,
+            false_index - 1,
+            continue_offset=int(instructions[cursor + 1].offset),
+            break_index=loop_end_index or false_index,
+        )
+        after_index = skip_loop_cleanup(instructions, false_index, end_index)
+        if (
+            instructions[false_index].opname == "POP_BLOCK"
+            and loop_end_index is not None
+            and after_index < loop_end_index <= end_index
+        ):
+            self.append_while(instructions, test, body, (after_index, loop_end_index))
+            return loop_end_index
+
+        self.append_while(instructions, test, body, None)
+        return after_index
+
+    def append_while(
+        self,
+        instructions: list[Instruction],
+        test: ast.expr,
+        body: list[ast.stmt],
+        else_range: tuple[int, int] | None,
+    ) -> None:
+        orelse: list[ast.stmt] = []
+
+        if else_range is not None:
+            orelse = self.translate_child_statements(instructions, *else_range)
+
+        self.statements.append(
+            ast.While(test=test, body=body or [ast.Pass()], orelse=orelse)
+        )
+
+    def try_translate_classic_while_loop(
+        self,
+        instructions: list[Instruction],
+        offset_to_index: dict[int, int],
+        cursor: int,
+        end_index: int,
+    ) -> int | None:
+        if self.version is None or not (3, 8) <= self.version[:2] <= (3, 9):
+            return None
+        if not instructions[cursor].is_jump_target:
+            return None
+
+        loop_offset = int(instructions[cursor].offset)
+        if loop_offset in self.loop_continue_offsets:
+            return None
+
+        back_jump_index = self.find_while_back_jump(
+            instructions, cursor + 1, end_index, loop_offset
+        )
+        if back_jump_index is None or back_jump_index + 1 > end_index:
+            return None
+
+        exit_index = back_jump_index + 1
+        read = self.block_loop_test(instructions, offset_to_index, cursor, exit_index)
+        if read is None:
+            # `while True:` has no test since 3.0
+            body = self.translate_loop_child_statements(
+                instructions,
+                cursor,
+                back_jump_index,
+                continue_offset=loop_offset,
+                break_index=exit_index,
+            )
+            self.statements.append(
+                make_endless_while(body or [ast.Pass()], loop_offset)
+            )
+            return exit_index
+
+        test, body_start = read
+        else_end_index = find_loop_else_end(
+            instructions, body_start, back_jump_index, exit_index, end_index
+        )
+        body = self.translate_loop_child_statements(
+            instructions,
+            body_start,
+            back_jump_index,
+            continue_offset=loop_offset,
+            break_index=else_end_index or exit_index,
+        )
+        else_range = None if else_end_index is None else (exit_index, else_end_index)
+        self.append_while(instructions, test, body, else_range)
+        return else_end_index or exit_index
+
+    def try_translate_endless_block_while(
+        self,
+        instructions: list[Instruction],
+        loop_start: int,
+        loop_end_index: int,
+    ) -> int | None:
+        loop_offset = int(instructions[loop_start].offset)
+        if is_loop_back_jump(instructions[loop_end_index - 1], loop_offset):
+            back_jump_index = loop_end_index - 1
+        else:
+            found = next(
+                (
+                    index
+                    for index in range(loop_end_index - 1, loop_start, -1)
+                    if instructions[index].opname == "POP_BLOCK"
+                    and is_loop_back_jump(instructions[index - 1], loop_offset)
+                ),
+                None,
+            )
+            if found is None:
+                return None
+
+            back_jump_index = found - 1
+
+        body = self.translate_loop_child_statements(
+            instructions,
+            loop_start,
+            back_jump_index,
+            continue_offset=loop_offset,
+            break_index=loop_end_index,
+        )
+        loop = make_endless_while(body or [ast.Pass()], loop_offset)
+
+        if back_jump_index + 2 < loop_end_index:
+            loop.orelse = self.translate_child_statements(
+                instructions, back_jump_index + 2, loop_end_index
+            )
+
+        self.statements.append(loop)
+        return loop_end_index
+
+    def read_block_while(
+        self,
+        instructions: list[Instruction],
+        offset_to_index: dict[int, int],
+        cursor: int,
+        loop_end_index: int,
+    ) -> tuple[ast.expr, int, int] | None:
+        loop_offset = int(instructions[cursor + 1].offset)
+
+        for index in range(cursor + 1, loop_end_index):
+            if not is_forward_conditional_jump(instructions[index]):
+                continue
+
+            exit_index = offset_to_index.get(int(instructions[index].argval))
+            if (
+                exit_index is not None
+                and exit_index < loop_end_index
+                and instructions[exit_index].opname == "POP_BLOCK"
+                and is_loop_back_jump(instructions[exit_index - 1], loop_offset)
+            ):
+                read = self.block_loop_test(
+                    instructions, offset_to_index, cursor + 1, exit_index
+                )
+                return None if read is None else (*read, exit_index)
+
+        return None
+
+    def read_first_test_while(
+        self,
+        instructions: list[Instruction],
+        offset_to_index: dict[int, int],
+        cursor: int,
+        end_index: int,
+    ) -> tuple[ast.expr, int, int] | None:
         loop_bounds = self.find_while_loop_bounds(
             instructions,
             offset_to_index,
@@ -295,7 +516,7 @@ class ControlLoopRecoveryMixin(ControlComprehensionRecoveryMixin, ABC):
             loop_start_index,
             condition_jump_index,
         )
-        if condition is None:
+        if condition is None or back_jump_index != false_index - 1:
             return None
 
         condition_jump = instructions[condition_jump_index]
@@ -304,15 +525,7 @@ class ControlLoopRecoveryMixin(ControlComprehensionRecoveryMixin, ABC):
             if is_false_jump(condition_jump.opname)
             else invert_condition(condition)
         )
-        body = self.translate_child_statements(
-            instructions,
-            condition_jump_index + 1,
-            back_jump_index,
-        )
-        self.statements.append(
-            ast.While(test=test, body=body or [ast.Pass()], orelse=[])
-        )
-        return skip_loop_cleanup(instructions, false_index, end_index)
+        return test, condition_jump_index + 1, false_index
 
     def find_while_loop_bounds(
         self,
@@ -371,7 +584,7 @@ class ControlLoopRecoveryMixin(ControlComprehensionRecoveryMixin, ABC):
             return None
 
         child = self.make_child()
-        iterable = self.evaluate_expression_range(
+        iterable = child.evaluate_expression_range(
             instructions, cursor + 1, get_iter_index
         )
         child.stack.append(iterable)
@@ -399,10 +612,11 @@ class ControlLoopRecoveryMixin(ControlComprehensionRecoveryMixin, ABC):
     ) -> int | None:
         for index in range(start_index, end_index):
             instruction = instructions[index]
-            if instruction.opname in {"FOR_ITER", "FOR_LOOP"}:
+            if instruction.opname == "FOR_ITER":
                 return None
             if is_forward_conditional_jump(instruction):
                 return index
+
         return None
 
     def find_while_back_jump(
@@ -418,6 +632,7 @@ class ControlLoopRecoveryMixin(ControlComprehensionRecoveryMixin, ABC):
                 continue
             if instruction.argval == loop_start_offset:
                 return index
+
         return None
 
     def try_translate_for_loop(
@@ -482,9 +697,12 @@ class ControlLoopRecoveryMixin(ControlComprehensionRecoveryMixin, ABC):
                     inlined_break_tails=break_exit.inlined_tails,
                 )
             )
+
         self.detached_resume_offsets = outer_resume_offsets
+
         if len(body_ranges) > 1:
             self.claimed_ranges[body_ranges[1][0]] = body_ranges[1][1] + 1
+
         if else_end_index is None:
             orelse, after_index = self.translate_for_orelse(
                 instructions,
@@ -500,6 +718,7 @@ class ControlLoopRecoveryMixin(ControlComprehensionRecoveryMixin, ABC):
                 pattern.after_index,
                 else_end_index,
             )
+
         self.statements.append(
             ast.For(
                 target=target,
@@ -524,6 +743,7 @@ class ControlLoopRecoveryMixin(ControlComprehensionRecoveryMixin, ABC):
         )
         if tail is None:
             return [(body_start, pattern.body_end_index)]
+
         tail_start, back_jump_index = tail
         self.detached_resume_offsets |= {int(instructions[tail_start].offset)}
         return [(body_start, pattern.body_end_index + 1), (tail_start, back_jump_index)]
@@ -535,56 +755,10 @@ class ControlLoopRecoveryMixin(ControlComprehensionRecoveryMixin, ABC):
     ) -> None:
         if not break_exit.tail_is_detached:
             return
+
         self.statements.extend(
             self.translate_child_statements(instructions, *break_exit.inlined_tails[0])
         )
-
-    def try_translate_legacy_for_loop(
-        self,
-        instructions: list[Instruction],
-        offset_to_index: dict[int, int],
-        cursor: int,
-        end_index: int,
-    ) -> int | None:
-        pattern = find_legacy_for_loop_pattern(
-            instructions, offset_to_index, cursor, end_index
-        )
-        if pattern is None:
-            return None
-
-        target, body_start = self.read_for_loop_target(
-            instructions,
-            cursor + 1,
-            pattern.body_end_index,
-        )
-        if target is None:
-            return None
-
-        iterable = self.pop_legacy_for_iterable()
-        body = self.translate_loop_child_statements(
-            instructions,
-            body_start,
-            pattern.body_end_index,
-            continue_offset=int(instructions[cursor].offset),
-            break_index=pattern.after_index,
-        )
-        orelse, after_index = self.translate_for_orelse(
-            instructions,
-            offset_to_index,
-            cursor,
-            pattern.after_index,
-            end_index,
-        )
-        self.statements.append(
-            ast.For(
-                target=target,
-                iter=iterable,
-                body=body or [ast.Pass()],
-                orelse=orelse,
-                type_comment=None,
-            )
-        )
-        return after_index
 
     def translate_for_orelse(
         self,
@@ -643,6 +817,7 @@ class ControlLoopRecoveryMixin(ControlComprehensionRecoveryMixin, ABC):
             if index in self.handler_exit_indexes:
                 self.handler_exit_indexes.discard(index)
                 del self.claimed_ranges[index]
+
         return child.translate_range(instructions, start_index, end_index)
 
     def break_line_offsets(
@@ -651,21 +826,23 @@ class ControlLoopRecoveryMixin(ControlComprehensionRecoveryMixin, ABC):
         body_end_index: int,
         break_index: int,
     ) -> frozenset[int]:
-        # python 3.14 keeps the line of a break that ends the loop body as a
-        # nop between the jump back and the code behind the loop, and the
-        # test in front of the break jumps to that nop
+        # 3.14 keeps a loop-ending break's line as a NOP the test jumps to
         if self.version is None or self.version < (3, 14):
             return frozenset()
+
         offsets: set[int] = set()
         index = min(break_index, len(instructions)) - 1
         while index > body_end_index and instructions[index].opname == "NOP":
             offsets.add(int(instructions[index].offset))
             index -= 1
+
         index = break_index
         while index < len(instructions) and instructions[index].opname == "NOP":
             index += 1
+
         if break_index < index < len(instructions):
             offsets.add(int(instructions[index].offset))
+
         return frozenset(offsets)
 
     def try_translate_inlined_break(
@@ -676,9 +853,11 @@ class ControlLoopRecoveryMixin(ControlComprehensionRecoveryMixin, ABC):
     ) -> int | None:
         if self.stack or not self.loop_break_offsets:
             return None
+
         marker = instructions[cursor]
         if marker.opname not in {"NOP", "POP_TOP"}:
             return None
+
         tail_end = inlined_break_tail_end(
             instructions,
             cursor,
@@ -687,8 +866,11 @@ class ControlLoopRecoveryMixin(ControlComprehensionRecoveryMixin, ABC):
         )
         if tail_end is None:
             return None
-        if instructions[cursor + 1].offset not in self.loop_break_offsets:
+
+        tail_start = break_marker_end(instructions, cursor, end_index)
+        if instructions[tail_start].offset not in self.loop_break_offsets:
             return None
+
         self.statements.append(ast.Break())
         return tail_end
 
@@ -700,19 +882,23 @@ class ControlLoopRecoveryMixin(ControlComprehensionRecoveryMixin, ABC):
     ) -> int | None:
         if self.stack or not self.loop_continue_offsets:
             return None
+
         copied_return_end = handler_break_return_end(instructions, cursor, end_index)
         if copied_return_end is not None:
             self.statements.append(ast.Break())
             return copied_return_end
+
         length = 3
         target = handler_break_target(instructions, cursor, end_index)
         if target is None:
             length = 2
             target = while_handler_break_target(instructions, cursor, end_index)
+
         if target is None:
             return None
         if target in self.loop_continue_offsets | self.detached_resume_offsets:
             return None
+
         self.statements.append(ast.Break())
         return cursor + length
 
@@ -728,6 +914,7 @@ class ControlLoopRecoveryMixin(ControlComprehensionRecoveryMixin, ABC):
             instruction = instructions[index]
             if instruction.opname != "SETUP_LOOP":
                 continue
+
             setup_end_index = offset_to_index.get(int(instruction.argval))
             if setup_end_index is None:
                 return None
@@ -735,7 +922,9 @@ class ControlLoopRecoveryMixin(ControlComprehensionRecoveryMixin, ABC):
                 return None
             if setup_end_index > end_index:
                 return None
+
             return setup_end_index
+
         return None
 
     def try_translate_async_for_loop(
@@ -784,6 +973,7 @@ class ControlLoopRecoveryMixin(ControlComprehensionRecoveryMixin, ABC):
                 body_start,
                 pattern.body_end_index,
             )
+
         return self.translate_loop_child_statements(
             instructions,
             body_start,
@@ -791,12 +981,6 @@ class ControlLoopRecoveryMixin(ControlComprehensionRecoveryMixin, ABC):
             continue_offset=back_jump.argval,
             break_index=pattern.after_index,
         )
-
-    def pop_legacy_for_iterable(self) -> ast.expr:
-        index_value = self.pop_or_none()
-        if not is_zero_constant(index_value):
-            self.warnings.append("FOR_LOOP index seed was not zero")
-        return coerce_expr(self.pop_or_none())
 
     def read_for_loop_target(
         self,
@@ -813,13 +997,16 @@ class ControlLoopRecoveryMixin(ControlComprehensionRecoveryMixin, ABC):
             name = make_name(str(instruction.argval), ast.Store())
             mark_line(name, line_in_effect(instructions, start_index))
             return name, start_index + 1
+
         target: ast.expr | None = None
-        if instruction.opname in {"UNPACK_EX", "UNPACK_SEQUENCE", "UNPACK_TUPLE"}:
+
+        if instruction.opname in {"UNPACK_EX", "UNPACK_SEQUENCE"}:
             target, cursor = self.read_unpack_loop_target(
                 instructions, start_index, end_index
             )
             if target is not None:
                 return target, cursor
+
         return self.read_stored_loop_target(instructions, start_index, end_index)
 
     def read_stored_loop_target(
@@ -833,12 +1020,16 @@ class ControlLoopRecoveryMixin(ControlComprehensionRecoveryMixin, ABC):
         child.stack.clear()
         child.stack.append(item)
         child.statements = []
+
         for cursor in range(start_index, end_index):
             if is_jump_op(instructions[cursor].opname):
                 break
+
             child.run_instruction(instructions[cursor])
+
             if not child.statements:
                 continue
+
             statement = child.statements[0]
             if (
                 isinstance(statement, ast.Assign)
@@ -847,6 +1038,7 @@ class ControlLoopRecoveryMixin(ControlComprehensionRecoveryMixin, ABC):
             ):
                 return statement.targets[0], cursor + 1
             break
+
         return None, start_index
 
     def read_unpack_loop_target(
@@ -864,6 +1056,7 @@ class ControlLoopRecoveryMixin(ControlComprehensionRecoveryMixin, ABC):
 
         targets: list[ast.expr] = []
         cursor = start_index + 1
+
         for index in range(count):
             target, next_cursor = self.read_for_loop_target(
                 instructions, cursor, end_index
@@ -872,8 +1065,10 @@ class ControlLoopRecoveryMixin(ControlComprehensionRecoveryMixin, ABC):
                 return None, start_index
             if index == starred_index:
                 target = ast.Starred(value=target, ctx=ast.Store())
+
             targets.append(target)
             cursor = next_cursor
+
         return ast.Tuple(elts=targets, ctx=ast.Store()), cursor
 
 
@@ -885,6 +1080,7 @@ def break_target_behind_range(
 ) -> int | None:
     if not exit_index < end_index < len(instructions):
         return None
+
     end_offset = instructions[end_index].offset
     targets = {
         instruction.argval
@@ -893,10 +1089,13 @@ def break_target_behind_range(
     }
     if len(targets) != 1:
         return None
+
     target = targets.pop()
+
     for index in range(end_index + 1, len(instructions)):
         if instructions[index].offset == target:
             return index
+
     return None
 
 
@@ -909,6 +1108,7 @@ def find_loop_else_end(
 ) -> int | None:
     if exit_index >= end_index:
         return None
+
     exit_offset = instructions[exit_index].offset
     targets = {
         instruction.argval
@@ -923,12 +1123,16 @@ def find_loop_else_end(
         return end_index
     if len(targets) != 1:
         return None
+
     else_end_offset = targets.pop()
+
     for index in range(exit_index + 1, min(end_index + 1, len(instructions))):
         if instructions[index].offset == else_end_offset:
             return index
+
     if else_end_offset in loop_break_offsets_at(instructions, end_index):
         return end_index
+
     return None
 
 
@@ -940,8 +1144,10 @@ def breaks_to_enclosing_loop(
 ) -> bool:
     if end_index >= len(instructions):
         return False
+
     closing = instructions[end_index]
     outer_offset = closing.argval
+
     if closing.opname == "END_FOR":
         outer_offset = next(
             (
@@ -952,10 +1158,12 @@ def breaks_to_enclosing_loop(
             ),
             None,
         )
-    elif closing.opname != "JUMP_BACKWARD":
+    elif closing.opname not in LOOP_BACK_JUMPS:
         return False
+
+    # a 3.8/3.9 break the optimizer sent to the head
     return any(
-        instruction.opname == "JUMP_BACKWARD"
+        instruction.opname in LOOP_BACK_JUMPS
         and instruction.argval == outer_offset
         and instructions[index - 1].opname == "POP_TOP"
         for index, instruction in enumerate(
@@ -981,6 +1189,7 @@ def starts_with_leaving_test(
                 "IF_" in instruction.opname
                 and instruction.argval > instructions[back_jump_index + 1].offset
             )
+
     return False
 
 
@@ -1002,6 +1211,7 @@ def tail_behind_written_continue(
         instructions[cursor].starts_line,
     }:
         return None
+
     test = instructions[back_jump_index - 1]
     if not is_forward_conditional_jump(test) or back_jump_index + 1 >= end_index:
         return None
@@ -1009,6 +1219,7 @@ def tail_behind_written_continue(
         return None
     if not is_terminal_op(instructions[end_index - 1].opname):
         return None
+
     inside = range(
         int(instructions[cursor].offset), int(instructions[end_index - 1].offset) + 1
     )
@@ -1017,6 +1228,7 @@ def tail_behind_written_continue(
         for instruction in instructions[back_jump_index + 1 : end_index]
     ):
         return None
+
     return end_index
 
 
@@ -1033,6 +1245,7 @@ def continued_only_from_handlers(
         return False
     if not is_terminal_op(instructions[loop_end_index - 1].opname):
         return False
+
     loop_offset = instructions[cursor].offset
     handlers = [
         span.target_index
@@ -1063,23 +1276,28 @@ def endless_loop_end(
         and instructions[handlers_start - 1].opname == "JUMP_BACKWARD_NO_INTERRUPT"
     ):
         handlers_start -= 2
+
     if handlers_start != end_index:
         return handlers_start
+
     cleanup_start = end_index
     while instructions[cleanup_start - 1].opname in INLINE_CLEANUP_OPS:
         cleanup_start -= 1
+
     if (
         instructions[end_index - 1].opname == "RERAISE"
         and instructions[cleanup_start - 1].opname == "JUMP_BACKWARD"
     ):
         return cleanup_start
+
     back_jump_index = find_closing_back_jump(instructions, cursor, end_index)
     if back_jump_index is None or back_jump_index + 1 >= end_index:
         return end_index
     if instructions[back_jump_index + 1].opname != "PUSH_EXC_INFO":
         return end_index
+
     last = instructions[end_index - 1]
-    if last.opname not in {"JUMP_BACKWARD", "JUMP_BACKWARD_NO_INTERRUPT"}:
+    if last.opname not in BACKWARD_JUMPS:
         return end_index
     if (
         instructions[cursor].offset
@@ -1087,7 +1305,20 @@ def endless_loop_end(
         <= instructions[back_jump_index].offset
     ):
         return back_jump_index + 1
+
     return end_index
+
+
+def resumes_behind_earlier_try(
+    code: object, instructions: list[Instruction], cursor: int, jump_index: int
+) -> bool:
+    spans = read_table_spans(code, instructions, make_offset_index(instructions))
+    handler = enclosing_handler(handler_regions(instructions, spans), jump_index)
+    if handler is None:
+        return False
+
+    starts = [span.start_index for span in spans if span.target_index == handler]
+    return bool(starts) and max(starts) < cursor
 
 
 def find_closing_back_jump(
@@ -1097,6 +1328,7 @@ def find_closing_back_jump(
 ) -> int | None:
     if not instructions[cursor].is_jump_target:
         return None
+
     start_offset = instructions[cursor].offset
     closing = [
         index
@@ -1116,6 +1348,7 @@ def loop_exit_is_break_target(
 ) -> bool:
     if exit_index >= end_index or not instructions[exit_index].is_jump_target:
         return False
+
     start_offset = instructions[cursor].offset
     end_offset = instructions[back_jump_index].offset
     return not any(
@@ -1146,6 +1379,7 @@ def find_loop_break_exit(
         )
     if else_end_index is not None:
         return LoopBreakExit(else_end_index)
+
     outer_index = break_target_behind_range(
         instructions, (body_start, body_end), exit_index, end_index
     )
@@ -1155,6 +1389,7 @@ def find_loop_break_exit(
     tails = find_inlined_break_tails(instructions, body_start, body_end, marker)
     if not tails:
         return LoopBreakExit()
+
     start, end = tails[0]
     behind = [end_index] if end_index + end - start <= len(instructions) else []
     for index in [*range(exit_index, end_index - (end - start) + 1), *behind]:
@@ -1164,9 +1399,12 @@ def find_loop_break_exit(
             continue
         if index == exit_index:
             return LoopBreakExit(None, tails)
+
         return LoopBreakExit(index, tails)
+
     if exit_index < end_index and is_terminal_op(instructions[end_index - 1].opname):
         return LoopBreakExit(end_index, tails, tail_is_detached=True)
+
     return LoopBreakExit()
 
 
@@ -1180,6 +1418,7 @@ def handler_break_else_end(
 ) -> int | None:
     if exit_index >= min(end_index, len(instructions) - 1):
         return None
+
     read_target = (
         handler_break_target if marker == "POP_TOP" else while_handler_break_target
     )
@@ -1196,12 +1435,14 @@ def handler_break_else_end(
         return end_index
     if len(targets) != 1:
         return None
+
     for index in range(exit_index, end_index - 1):
         if (
             instructions[index].opname == "POP_EXCEPT"
             and instructions[index + 1].argval in targets
         ):
             return index
+
     return end_index
 
 
@@ -1213,10 +1454,36 @@ def stays_in_loop(
 ) -> bool:
     if target >= instructions[exit_index].offset:
         return False
+
     return not any(
         instruction.opname == "PUSH_EXC_INFO" and target <= instruction.offset
         for instruction in instructions[:body_start]
     )
+
+
+def tails_below_loop(
+    instructions: list[Instruction],
+    loop_start: int,
+    loop_end: int,
+    tails: tuple[tuple[int, int], ...],
+) -> tuple[tuple[int, int], ...]:
+    inside = {index for start, end in tails for index in range(start, end)}
+    lines = [
+        item.starts_line
+        for index, item in enumerate(instructions[loop_start:loop_end], loop_start)
+        if index not in inside and item.starts_line is not None
+    ]
+    if not lines:
+        return tails
+
+    last_line = max(lines)
+    if all(
+        (line := line_in_effect(instructions, start)) is not None and line > last_line
+        for start, _ in tails
+    ):
+        return tails
+
+    return ()
 
 
 def find_inlined_break_tails(
@@ -1225,18 +1492,40 @@ def find_inlined_break_tails(
     body_end: int,
     marker: str,
 ) -> tuple[tuple[int, int], ...]:
-    tails: list[tuple[int, int]] = []
+    found: list[tuple[int, int, int]] = []
+
     for index in range(body_start, body_end):
         tail_end = inlined_break_tail_end(instructions, index, body_end, marker)
         if tail_end is not None:
-            tails.append((index + 1, tail_end))
+            found.append(
+                (index, break_marker_end(instructions, index, body_end), tail_end)
+            )
+
+    markers = {index for index, _, _ in found}
+    tails = [(start, end) for _, start, end in found if start not in markers]
     if any(
         end - start != tails[0][1] - tails[0][0]
         or not same_instruction_run(instructions, tails[0][0], start, end - start)
         for start, end in tails
     ):
         return ()
+
     return tuple(tails)
+
+
+def break_marker_end(
+    instructions: list[Instruction], marker_index: int, end_index: int
+) -> int:
+    index = marker_index + 1
+    if (
+        instructions[marker_index].opname == "POP_TOP"
+        and index < end_index
+        and instructions[index].opname == "POP_TOP"
+        and instructions[index].starts_line is None
+    ):
+        index += 1
+
+    return index
 
 
 def inlined_break_tail_end(
@@ -1245,36 +1534,25 @@ def inlined_break_tail_end(
     end_index: int,
     marker: str,
 ) -> int | None:
-    start_index = marker_index + 1
-    if start_index >= end_index:
-        return None
     if instructions[marker_index].opname != marker:
+        return None
+
+    start_index = break_marker_end(instructions, marker_index, end_index)
+    if start_index >= end_index:
         return None
     if instructions[marker_index].starts_line is None:
         return None
     if instructions[start_index].starts_line is None:
         return None
+
     for index in range(start_index, end_index):
         opname = instructions[index].opname
         if opname in {"RETURN_CONST", "RETURN_VALUE"}:
             return index + 1
         if "JUMP" in opname or opname in {"FOR_ITER", "POP_TOP"}:
             return None
+
     return None
-
-
-def same_instruction_run(
-    instructions: list[Instruction],
-    left_start: int,
-    right_start: int,
-    length: int,
-) -> bool:
-    return all(
-        same_instruction_behavior(
-            instructions[left_start + step], instructions[right_start + step]
-        )
-        for step in range(length)
-    )
 
 
 def loop_break_offsets_at(
@@ -1283,12 +1561,15 @@ def loop_break_offsets_at(
 ) -> frozenset[int]:
     if break_index >= len(instructions):
         return frozenset()
+
     instruction = instructions[break_index]
     offsets = {int(instruction.offset)}
+
     if instruction.opname in {"JUMP", "JUMP_ABSOLUTE", "JUMP_FORWARD"} and isinstance(
         instruction.argval, int
     ):
         offsets.add(instruction.argval)
+
     return frozenset(offsets)
 
 
@@ -1298,27 +1579,19 @@ def loop_exit_is_none_return(
 ) -> bool:
     if break_index >= len(instructions):
         return True
+
     cursor = skip_ignorable_instructions(instructions, break_index, len(instructions))
     if cursor >= len(instructions):
         return True
+
     instruction = instructions[cursor]
     if instruction.opname == "RETURN_CONST":
         return instruction.argval is None
     if instruction.opname != "LOAD_CONST" or instruction.argval is not None:
         return False
+
     cursor = skip_ignorable_instructions(instructions, cursor + 1, len(instructions))
     return cursor < len(instructions) and instructions[cursor].opname == "RETURN_VALUE"
-
-
-def previous_non_metadata_index(
-    instructions: list[Instruction],
-    cursor: int,
-) -> int | None:
-    while cursor >= 0:
-        if instructions[cursor].opname not in {"CACHE", "EXTENDED_ARG", "NOP"}:
-            return cursor
-        cursor -= 1
-    return None
 
 
 def find_setup_loop_get_iter(
@@ -1330,6 +1603,7 @@ def find_setup_loop_get_iter(
         instruction = instructions[index]
         if instruction.opname == "GET_ITER":
             return index
-        if instruction.opname in {"FOR_ITER", "FOR_LOOP"}:
+        if instruction.opname == "FOR_ITER":
             return None
+
     return None

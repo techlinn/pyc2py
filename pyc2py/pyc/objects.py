@@ -39,14 +39,18 @@ def read_dict(
     reader: ObjectReader, offset: int, depth: int
 ) -> tuple[dict[Any, Any], int]:
     result: dict[Any, Any] = {}
+
     for _index in range(MAX_MARSHAL_COLLECTION_ITEMS):
         key, offset = reader.read_object(offset, depth + 1)
         if key is NULL_OBJECT:
             return result, offset
+
         value, offset = reader.read_object(offset, depth + 1)
         if value is NULL_OBJECT:
             raise ValueError("marshal dictionary value cannot be null sentinel")
+
         result[key] = value
+
     raise ValueError("marshal dictionary exceeded item limit")
 
 
@@ -54,14 +58,18 @@ def read_frozen_dict(
     reader: ObjectReader, offset: int, depth: int
 ) -> tuple[FrozenDictValue, int]:
     items: list[tuple[Any, Any]] = []
+
     for _index in range(MAX_MARSHAL_COLLECTION_ITEMS):
         key, offset = reader.read_object(offset, depth + 1)
         if key is NULL_OBJECT:
             return FrozenDictValue(tuple(items)), offset
+
         value, offset = reader.read_object(offset, depth + 1)
         if value is NULL_OBJECT:
             raise ValueError("marshal frozendict value cannot be null sentinel")
+
         items.append((key, value))
+
     raise ValueError("marshal frozendict exceeded item limit")
 
 
@@ -128,9 +136,9 @@ def read_slice(
     start, offset = reader.read_object(offset, depth + 1)
     stop, offset = reader.read_object(offset, depth + 1)
     step, offset = reader.read_object(offset, depth + 1)
-
     if start is NULL_OBJECT or stop is NULL_OBJECT or step is NULL_OBJECT:
         raise ValueError("marshal slice component cannot be null sentinel")
+
     return slice(start, stop, step), offset
 
 
@@ -208,6 +216,7 @@ def read_marshal_string(
         index, offset = read_int32(data, offset)
         if index < 0 or index >= len(interned):
             raise ValueError("marshal interned string reference is invalid")
+
         return interned[index], offset
 
     if type_code in {ord("s"), ord("t")}:
@@ -216,10 +225,12 @@ def read_marshal_string(
         reader = STRING_READERS.get(type_code)
         if reader is None:
             raise ValueError(f"unsupported marshal string type: {type_code!r}")
+
         value, offset = reader(data, offset)
 
     if type_code in INTERNED_STRING_CODES:
         interned.append(value)
+
     return value, offset
 
 
@@ -231,10 +242,13 @@ def read_legacy_sensitive_string(
 ) -> tuple[Any, int]:
     if type_code == ord("s") or version < (3, 0):
         raw, offset = read_bytes(data, offset)
+
         if version < (3, 0):
             return (
                 LegacyByteString(raw.decode("latin-1", errors="surrogateescape")),
                 offset,
             )
+
         return raw, offset
+
     return read_text(data, offset)

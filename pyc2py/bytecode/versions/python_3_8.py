@@ -1,3 +1,6 @@
+MAGICS = (3413,)
+MAGIC_RANGE = (3400, 3413)
+
 OPMAP: dict[int, str] = {
     1: "POP_TOP",
     2: "ROT_TWO",

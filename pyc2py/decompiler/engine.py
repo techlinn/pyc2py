@@ -1,7 +1,7 @@
 import ast
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, cast
 
 from pyc2py.astree import (
     LINE_BREAK_ALWAYS,
@@ -10,19 +10,36 @@ from pyc2py.astree import (
     add_module_global_declarations,
     add_nonlocal_declarations,
     clean_decompiled_body,
+    docstring_from_its_first_line,
+    make_gap,
+    mark_statement_line,
     merge_copied_return_branches,
     name_line_breaks,
+    spell_f_strings_for,
     unparse_keeping_lines,
 )
 from pyc2py.bytecode.decoder import decode_instructions
 from pyc2py.bytecode.instruction import IGNORED_BEHAVIOR_OPNAMES, Instruction
-from pyc2py.bytecode.metadata import make_offset_index
+from pyc2py.bytecode.metadata import (
+    line_in_effect,
+    make_offset_index,
+    previous_non_metadata_index,
+)
 from pyc2py.bytecode.opcode_table import normalized_opcode_name
+from pyc2py.cfg import UNCONDITIONAL_JUMPS
+from pyc2py.decompiler.block_try import (
+    try_translate_block_except,
+    try_translate_copied_finally,
+    try_translate_copied_tail_except,
+    try_translate_returning_finally,
+)
+from pyc2py.decompiler.block_with import try_translate_block_with
 from pyc2py.decompiler.context import NativeResult, ReadBudget, UnpackGroup
 from pyc2py.decompiler.control import ControlRecoveryMixin
 from pyc2py.decompiler.control_comprehension import INLINE_CLEANUP_OPS
 from pyc2py.decompiler.exception_structures import (
     make_handler_exit_marker,
+    may_start_table_try,
     try_translate_except,
     try_translate_exception_table_except,
     try_translate_exception_table_except_finally,
@@ -39,6 +56,7 @@ from pyc2py.decompiler.opcodes.flow import (
 )
 from pyc2py.decompiler.print_runtime import (
     PrintRuntimeMixin,
+    mark_legacy_unicode_constants,
     render_legacy_print_source,
 )
 from pyc2py.decompiler.recover import (
@@ -46,16 +64,24 @@ from pyc2py.decompiler.recover import (
     CO_VARARGS,
     CO_VARKEYWORDS,
 )
-from pyc2py.decompiler.runtime import take_scope_warnings
+from pyc2py.decompiler.respell import ADDED_INITIALIZER, match_original_bytecode
+from pyc2py.decompiler.runtime import decompile_body, take_scope_warnings
 from pyc2py.decompiler.stack_runtime import StackRuntimeMixin
 from pyc2py.decompiler.structures import (
+    is_conditional_jump_name,
     is_false_jump,
     is_forward_conditional_jump,
     skip_returning_with_exception_handler,
 )
 from pyc2py.decompiler.variable_annotations import restore_variable_annotations
+from pyc2py.spellings import use_common_spellings
 from pyc2py.stack import FastStack
-from pyc2py.types import LiveWarningList, ProgressCallback
+from pyc2py.types import (
+    MISSING_BODY,
+    LiveWarningList,
+    ProgressCallback,
+    emit_progress,
+)
 
 READ_STEPS_PER_INSTRUCTION = 100
 READ_STEPS_ALLOWANCE = 10_000
@@ -63,6 +89,30 @@ READ_STEPS_ALLOWANCE = 10_000
 
 class ReadBudgetExceededError(RuntimeError):
     pass
+
+
+@dataclass(slots=True)
+class StatementLine:
+    in_effect: int | None
+    started: int | None = None
+
+
+def header_marker_index(
+    instructions: list[Instruction], start: int, end: int
+) -> int | None:
+    # a block whose first line is a NOP's keeps its header's line there
+    first = next(
+        (index for index in range(start, end) if instructions[index].starts_line),
+        None,
+    )
+    if first is None or first + 1 >= end or instructions[first].opname != "NOP":
+        return None
+
+    following = instructions[first + 1].starts_line
+    if following is None or following == instructions[first].starts_line:
+        return None
+
+    return first
 
 
 @dataclass(slots=True)
@@ -75,46 +125,56 @@ class NativeDecompiler(
     code: object
     version: tuple[int, ...] | None
     is_module: bool = True
+    # each nested scope alone, to empty only the bodies that do not hold
+    checks_scopes: bool = False
     progress: ProgressCallback | None = None
     stack: FastStack[object] = field(default_factory=FastStack[object])
-    statements: list[ast.stmt] = field(default_factory=list)
-    warnings: list[str] = field(default_factory=list)
+    statements: list[ast.stmt] = field(default_factory=list[ast.stmt])
+    warnings: list[str] = field(default_factory=list[str])
     kw_names: tuple[str, ...] = ()
-    unpack_groups: list[UnpackGroup] = field(default_factory=list)
-    pending_print_items: list[ast.expr] = field(default_factory=list)
+    unpack_groups: list[UnpackGroup] = field(default_factory=list[UnpackGroup])
+    pending_print_items: list[ast.expr] = field(default_factory=list[ast.expr])
     pending_print_target: ast.expr | None = None
-    global_names: list[str] = field(default_factory=list)
+    global_names: list[str] = field(default_factory=list[str])
     pending_simultaneous_store_count: int = 0
     simultaneous_store_group: int = 0
     simultaneous_store_reversed: bool = False
-    nop_lines: list[int] = field(default_factory=list)
+    nop_lines: list[int] = field(default_factory=list[int])
     saw_unicode_literals_future: bool = False
     saw_print_function_future: bool = False
-    loop_continue_offsets: frozenset[int] = field(default_factory=frozenset)
-    loop_break_offsets: frozenset[int] = field(default_factory=frozenset)
+    loop_continue_offsets: frozenset[int] = field(default_factory=frozenset[int])
+    loop_break_offsets: frozenset[int] = field(default_factory=frozenset[int])
     loop_none_return_is_break: bool = False
     compare_chain_links: dict[int, tuple[ast.expr, ast.Compare]] = field(
-        default_factory=dict
+        default_factory=dict[int, tuple[ast.expr, ast.Compare]]
     )
-    compare_chain_cleanups: set[int] = field(default_factory=set)
-    handler_exit_indexes: set[int] = field(default_factory=set)
-    detached_resume_offsets: frozenset[int] = field(default_factory=frozenset)
+    compare_chain_cleanups: set[int] = field(default_factory=set[int])
+    handler_exit_indexes: set[int] = field(default_factory=set[int])
+    detached_resume_offsets: frozenset[int] = field(default_factory=frozenset[int])
     evaluating_test_operand: bool = False
-    claimed_ranges: dict[int, int] = field(default_factory=dict)
-    active_handlers: frozenset[int] = field(default_factory=frozenset)
-    implicit_return_offsets: frozenset[int] = field(default_factory=frozenset)
-    written_return_offsets: frozenset[int] = field(default_factory=frozenset)
-    line_break_offsets: dict[int, tuple[str, ...]] = field(default_factory=dict)
+    evaluating_values: bool = False
+    claimed_ranges: dict[int, int] = field(default_factory=dict[int, int])
+    active_handlers: frozenset[int] = field(default_factory=frozenset[int])
+    implicit_return_offsets: frozenset[int] = field(default_factory=frozenset[int])
+    written_return_offsets: frozenset[int] = field(default_factory=frozenset[int])
+    line_break_offsets: dict[int, tuple[str, ...]] = field(
+        default_factory=dict[int, tuple[str, ...]]
+    )
     budget: ReadBudget = field(default_factory=ReadBudget)
 
     def __post_init__(self) -> None:
         if self.progress is not None and type(self.warnings) is list:
             self.warnings = LiveWarningList(self.progress, prefix="warning: native: ")
 
-    def new_child(self, code: object) -> "NativeDecompiler":
-        return NativeDecompiler(code=code, version=self.version, is_module=False)
+    def new_child(self, code: object) -> NativeDecompiler:
+        return NativeDecompiler(
+            code=code,
+            version=self.version,
+            is_module=False,
+            checks_scopes=self.checks_scopes,
+        )
 
-    def make_child(self) -> "NativeDecompiler":
+    def make_child(self) -> NativeDecompiler:
         return NativeDecompiler(
             code=self.code,
             version=self.version,
@@ -143,6 +203,30 @@ class NativeDecompiler(
             flags & CO_FUTURE_UNICODE_LITERALS
         )
 
+    def unparse_each_statement(self, module: ast.Module) -> str:
+        try:
+            return unparse_keeping_lines(module)
+        except Exception:
+            pass
+
+        parts: list[str] = []
+
+        for statement in module.body:
+            single = ast.Module(body=[statement], type_ignores=[])
+
+            try:
+                parts.append(unparse_keeping_lines(single))
+            except Exception as error:
+                reason = f"{type(error).__name__}: {error}"
+                line = getattr(statement, "lineno", "?")
+                self.warnings.append(
+                    f"{MISSING_BODY}: the statement at line {line} could not be"
+                    f" written ({reason})"
+                )
+                parts.append(ast.unparse(make_gap(f"write this statement ({reason})")))
+
+        return "\n".join(parts)
+
     def decompile(self) -> NativeResult | None:
         self.emit_progress(f"decoding bytecode for {self.code_name()}")
         instructions = decode_instructions(self.code, self.version)
@@ -157,21 +241,23 @@ class NativeDecompiler(
         )
         if not has_return_const(self.version):
             self.written_return_offsets = find_written_return_offsets(instructions)
+
         self.line_break_offsets = find_line_break_offsets(instructions, self.version)
         self.statements = self.translate_range(instructions, 0, len(instructions))
         self.emit_progress("flushing pending print statements")
         self.flush_print_items(newline=True)
+
         if not self.is_module:
             self.emit_progress("recovering function global declarations")
             self.add_global_names(find_loaded_global_store_sources(instructions))
 
         self.emit_progress("cleaning recovered AST")
-        if self.version is not None and self.version >= (3, 14):
-            self.statements = merge_copied_return_branches(self.statements)
-            self.statements = restore_variable_annotations(
-                self.statements, instructions, self.version, self.new_child
-            )
+        self.undo_version_rewrites(instructions)
         body = clean_decompiled_body(self.statements, self.is_module)
+        # a module's first line is that of its first instruction, not line 1
+        header = 0 if self.is_module else int(getattr(self.code, "co_firstlineno", 0))
+        docstring_from_its_first_line(body, self.version, header + 1)
+
         if self.is_module:
             self.emit_progress("recovering module global declarations")
             body = add_module_global_declarations(
@@ -185,30 +271,70 @@ class NativeDecompiler(
             body = restore_else_before_shared_return(body, self.code)
             body = add_missing_local_initializers(body, instructions, self.code)
             body = add_dead_yield(body, self.code)
+            bare_generator_returns(body, self.code)
             spell_while_one(body, instructions, self.code)
             body = add_global_declarations(body, self.global_names)
             body = add_nonlocal_declarations(
                 body, find_explicit_nonlocal_names(self.code, instructions)
             )
+
         if not body and not self.is_module:
             body.append(ast.Pass())
+
         self.warnings.extend(take_scope_warnings(body))
         self.emit_progress("fixing AST locations")
         module = ast.fix_missing_locations(ast.Module(body=body, type_ignores=[]))
-        self.emit_progress("unparsing AST to source")
-        if self.is_module:
-            name_line_breaks(module)
-        source = unparse_keeping_lines(module) + "\n"
+        spell_f_strings_for(module, self.version)
+        use_common_spellings(module, self.version)
+        source = self.write_source(module)
+        if source is None:
+            return NativeResult(
+                source=None, warnings=tuple(self.warnings), body=tuple(body)
+            )
+
         if (
             self.should_render_legacy_print_source()
             and not self.saw_print_function_future
         ):
             self.emit_progress("rendering legacy print statements")
             source = render_legacy_print_source(source)
-            return NativeResult(source=source, warnings=tuple(self.warnings))
+
         return NativeResult(
             source=source, warnings=tuple(self.warnings), body=tuple(body)
         )
+
+    def write_source(self, module: ast.Module) -> str | None:
+        # a nested scope is written with its module, unless scopes are checked
+        if not self.is_module and not self.checks_scopes:
+            return None
+
+        if self.is_module:
+            self.emit_progress("matching functions to the original bytecode")
+            match_original_bytecode(module, self.code, self.version)
+            name_line_breaks(module)
+
+        if (
+            self.should_render_legacy_print_source()
+            and not self.saw_unicode_literals_future
+        ):
+            mark_legacy_unicode_constants(module)
+
+        self.emit_progress("unparsing AST to source")
+
+        if self.checks_scopes:
+            return self.unparse_each_statement(module) + "\n"
+
+        return written_python(module)
+
+    def undo_version_rewrites(self, instructions: list[Instruction]) -> None:
+        if self.version is None:
+            return
+        if self.version >= (3, 12):
+            self.statements = merge_copied_return_branches(self.statements)
+        if self.version >= (3, 14):
+            self.statements = restore_variable_annotations(
+                self.statements, instructions, self.version, self.new_child
+            )
 
     def spend_read_step(self, size: int) -> None:
         self.budget.steps += 1
@@ -232,6 +358,7 @@ class NativeDecompiler(
     def should_render_legacy_print_source(self) -> bool:
         if self.version is None or self.version >= (3, 0):
             return False
+
         return self.is_module
 
     def should_skip_loop_break_cleanup_pop(
@@ -251,6 +378,7 @@ class NativeDecompiler(
         next_instruction = instructions[next_index]
         if next_instruction.opname not in {"JUMP", "JUMP_ABSOLUTE", "JUMP_FORWARD"}:
             return False
+
         return next_instruction.argval in self.loop_break_offsets
 
     def skip_orphan_call_suffix(
@@ -267,8 +395,8 @@ class NativeDecompiler(
         call_index = next_non_metadata_index(instructions, cursor)
         if call_index is None or call_index >= end_index:
             return None
-        call = instructions[call_index]
 
+        call = instructions[call_index]
         precall_index = previous_non_metadata_index(instructions, call_index - 1)
         if not self.is_orphan_call_suffix(call, precall_index, instructions):
             return None
@@ -276,8 +404,10 @@ class NativeDecompiler(
         cursor = call_index + 1
         while cursor < end_index and instructions[cursor].opname == "CACHE":
             cursor += 1
+
         if cursor < end_index and instructions[cursor].opname == "POP_TOP":
             return cursor + 1
+
         return cursor
 
     def is_orphan_call_suffix(
@@ -310,13 +440,21 @@ class NativeDecompiler(
         saved_statements = self.statements
         self.statements = []
         offset_to_index = make_offset_index(instructions)
-
+        statement_line: StatementLine | None = None
+        header_marker = header_marker_index(instructions, start_index, end_index)
         cursor = start_index
         while cursor < end_index:
             self.spend_read_step(len(instructions))
+
             if cursor in self.claimed_ranges:
+                # handlers behind the module's implicit return belong to their try
+                if self.is_module and is_after_implicit_module_return(
+                    instructions, cursor, start_index, self.version
+                ):
+                    break
                 if cursor in self.handler_exit_indexes:
                     self.append_handler_exit_marker(instructions, cursor)
+
                 cursor = self.claimed_ranges[cursor]
                 continue
 
@@ -337,25 +475,76 @@ class NativeDecompiler(
                 or is_trailing_inline_cleanup(instructions, cursor, start_index)
             ):
                 break
+            if cursor != header_marker:
+                statement_line = self.statement_line_so_far(
+                    instructions, cursor, statement_line
+                )
 
-            advanced = self.try_translate_structured_range(
-                instructions,
-                offset_to_index,
-                cursor,
-                end_index,
+            count = len(self.statements)
+            cursor = self.translate_step(
+                instructions, offset_to_index, cursor, end_index
             )
-            if advanced is None:
-                self.run_instruction(instructions[cursor])
-                self.mark_shared_none_return(instructions, cursor)
-                cursor += 1
-            else:
-                cursor = advanced
+            statement_line = self.mark_new_statements(count, statement_line)
 
-        self.flush_yield_expressions()
+        if not self.evaluating_values:
+            self.flush_yield_expressions()
+
         self.flush_print_items(newline=False)
         result = self.statements
         self.statements = saved_statements
         return result
+
+    def statement_line_so_far(
+        self,
+        instructions: list[Instruction],
+        cursor: int,
+        so_far: StatementLine | None,
+    ) -> StatementLine | None:
+        # a statement starts on the smallest line one of its instructions starts
+        instruction = instructions[cursor]
+        if instruction.opname in PROLOGUE_OPS:
+            return so_far
+        if so_far is None:
+            so_far = StatementLine(line_in_effect(instructions, cursor))
+
+        line = instruction.starts_line
+        if line is not None and (so_far.started is None or line < so_far.started):
+            so_far.started = line
+
+        return so_far
+
+    def mark_new_statements(
+        self, count: int, line: StatementLine | None
+    ) -> StatementLine | None:
+        if len(self.statements) == count:
+            return line
+
+        found = None if line is None else line.started or line.in_effect
+
+        for statement in self.statements[count:]:
+            mark_statement_line(statement, found)
+
+        return None
+
+    def translate_step(
+        self,
+        instructions: list[Instruction],
+        offset_to_index: dict[int, int],
+        cursor: int,
+        end_index: int,
+    ) -> int:
+        advanced = self.try_translate_structured_range(
+            instructions,
+            offset_to_index,
+            cursor,
+            end_index,
+        )
+        if advanced is not None:
+            return advanced
+
+        self.run_instruction(instructions[cursor])
+        self.mark_shared_none_return(instructions, cursor)
+        return cursor + 1
 
     def append_handler_exit_marker(
         self,
@@ -377,9 +566,11 @@ class NativeDecompiler(
             return
         if self.version is not None and self.version < (3, 11):
             return
+
         previous_index = previous_non_metadata_index(instructions, start_index - 1)
         if previous_index is None:
             return
+
         previous = instructions[previous_index].opname
         if is_terminal_op(previous) or is_jump_op(previous):
             return
@@ -403,6 +594,7 @@ class NativeDecompiler(
             )
         if link_end is not None:
             return link_end
+
         return self.skip_compare_chain_cleanup(instructions, offset_to_index, cursor)
 
     def read_compare_chain_link(
@@ -413,20 +605,24 @@ class NativeDecompiler(
     ) -> int | None:
         if len(self.stack) < 2 or not is_copy_top(instructions[cursor]):
             return None
+
         compare, middle = self.stack[-1], self.stack[-2]
         if (
             not isinstance(compare, ast.Compare)
             or compare.comparators[-1] is not middle
         ):
             return None
+
         middle = compare.comparators[-1]
         jump_index = next_non_metadata_index(instructions, cursor + 1)
         if jump_index is not None and instructions[jump_index].opname == "TO_BOOL":
             jump_index = next_non_metadata_index(instructions, jump_index + 1)
         if jump_index is None or instructions[jump_index].opname != "POP_JUMP_IF_FALSE":
             return None
+
         pop_index = next_non_metadata_index(instructions, jump_index + 1)
         cleanup_index = offset_to_index.get(instructions[jump_index].argval)
+
         if pop_index is None or instructions[pop_index].opname != "POP_TOP":
             return None
         if cleanup_index is None or instructions[cleanup_index].opname != "SWAP":
@@ -446,16 +642,23 @@ class NativeDecompiler(
         jump = instructions[cursor]
         if len(self.stack) < 2 or jump.opname != "JUMP_IF_FALSE_OR_POP":
             return None
+
         compare, middle = self.stack[-1], self.stack[-2]
         if (
             not isinstance(compare, ast.Compare)
             or compare.comparators[-1] is not middle
         ):
             return None
+
         middle = compare.comparators[-1]
         cleanup_index = offset_to_index.get(jump.argval)
-        if cleanup_index is None or instructions[cleanup_index].opname != "SWAP":
+        # SWAP 2, ROT_TWO before 3.11
+        if cleanup_index is None or instructions[cleanup_index].opname not in {
+            "SWAP",
+            "ROT_TWO",
+        }:
             return None
+
         self.stack.pop()
         self.compare_chain_links[id(middle)] = (middle, compare)
         self.compare_chain_cleanups.add(instructions[cleanup_index].offset)
@@ -470,16 +673,19 @@ class NativeDecompiler(
         jump = instructions[cursor]
         if len(self.stack) < 2 or jump.opname != "POP_JUMP_IF_FALSE":
             return None
+
         compare, middle = self.stack[-1], self.stack[-2]
         if (
             not isinstance(compare, ast.Compare)
             or compare.comparators[-1] is not middle
         ):
             return None
+
         middle = compare.comparators[-1]
         cleanup_index = offset_to_index.get(jump.argval)
         if cleanup_index is None or instructions[cleanup_index].opname != "POP_TOP":
             return None
+
         self.stack.pop()
         self.compare_chain_links[id(middle)] = (middle, compare)
         return cursor + 1
@@ -497,12 +703,14 @@ class NativeDecompiler(
             return None
         if instructions[cursor + 1].offset not in self.compare_chain_cleanups:
             return None
+
         return offset_to_index.get(instruction.argval)
 
     def join_compare_chain(self, compare: ast.Compare) -> ast.Compare:
         link = self.compare_chain_links.pop(id(compare.left), None)
         if link is None or link[0] is not compare.left:
             return compare
+
         chain = link[1]
         return ast.Compare(
             left=chain.left,
@@ -535,7 +743,27 @@ class NativeDecompiler(
             return skipped_with_cleanup
         if should_skip_range_cursor(self, instructions, cursor, start_index):
             return cursor + 1
+        if self.jumps_over_claimed_code(instructions, cursor):
+            return cursor + 1
+
         return None
+
+    def jumps_over_claimed_code(
+        self, instructions: list[Instruction], cursor: int
+    ) -> bool:
+        # a jump over handlers a statement already read leads where the reading goes
+        jump = instructions[cursor]
+        if jump.opname not in UNCONDITIONAL_JUMPS:
+            return False
+
+        index = cursor + 1
+        while index in self.claimed_ranges:
+            index = self.claimed_ranges[index]
+
+        return (
+            cursor + 1 < index < len(instructions)
+            and instructions[index].offset == jump.argval
+        )
 
     def try_translate_structured_range(
         self,
@@ -552,6 +780,7 @@ class NativeDecompiler(
         )
         if compare_chain is not None:
             return compare_chain
+
         if instruction.opname in OR_POP_AFTER_TEST:
             mixed = self.try_translate_mixed_short_circuit(
                 instructions, offset_to_index, cursor, end_index
@@ -567,6 +796,13 @@ class NativeDecompiler(
         )
         if retry_loop is not None:
             return retry_loop
+
+        # a 3.8/3.9 loop can start with a try
+        classic_loop = self.try_translate_classic_while_loop(
+            instructions, offset_to_index, cursor, end_index
+        )
+        if classic_loop is not None:
+            return classic_loop
 
         advanced = self.try_translate_exception_range(
             instructions,
@@ -622,23 +858,39 @@ class NativeDecompiler(
         )
         if advanced is not None:
             return advanced
-
+        if opname in {"SETUP_WITH", "DUP_TOP"}:
+            return try_translate_block_with(
+                self, instructions, offset_to_index, cursor, end_index
+            )
         if opname == "SETUP_FINALLY":
-            return try_translate_finally(
-                self,
-                instructions,
-                offset_to_index,
-                cursor,
-                end_index,
+            return (
+                try_translate_copied_tail_except(
+                    self, instructions, offset_to_index, cursor, end_index
+                )
+                or try_translate_block_except(
+                    self, instructions, offset_to_index, cursor, end_index
+                )
+                or try_translate_copied_finally(
+                    self, instructions, offset_to_index, cursor, end_index
+                )
+                or try_translate_finally(
+                    self, instructions, offset_to_index, cursor, end_index
+                )
+                or try_translate_returning_finally(
+                    self, instructions, offset_to_index, cursor, end_index
+                )
             )
         if opname == "SETUP_EXCEPT":
-            return try_translate_except(
+            return try_translate_block_except(
+                self, instructions, offset_to_index, cursor, end_index
+            ) or try_translate_except(
                 self,
                 instructions,
                 offset_to_index,
                 cursor,
                 end_index,
             )
+
         return None
 
     def try_translate_exception_table_range(
@@ -648,6 +900,9 @@ class NativeDecompiler(
         cursor: int,
         end_index: int,
     ) -> int | None:
+        if not may_start_table_try(self.code, instructions, offset_to_index, cursor):
+            return None
+
         for handler in (
             try_translate_out_of_line_try,
             try_translate_exception_table_finally,
@@ -658,6 +913,7 @@ class NativeDecompiler(
             advanced = handler(self, instructions, offset_to_index, cursor, end_index)
             if advanced is not None:
                 return advanced
+
         return None
 
     def try_translate_statement_range(
@@ -676,11 +932,13 @@ class NativeDecompiler(
         )
         if inlined_break is not None:
             return inlined_break
+
         handler_break = self.try_translate_break_out_of_handler(
             instructions, cursor, end_index
         )
         if handler_break is not None:
             return handler_break
+
         short_circuit = self.try_translate_short_circuit_expression(
             instructions,
             offset_to_index,
@@ -689,6 +947,7 @@ class NativeDecompiler(
         )
         if short_circuit is not None:
             return short_circuit
+
         cleanup_return = self.try_translate_loop_cleanup_return(
             instructions,
             cursor,
@@ -722,10 +981,11 @@ class NativeDecompiler(
                 cursor,
                 end_index,
             )
-        if opname == "SWAP":
+        if opname in {"SWAP", *ROTATION_SWAPS}:
             self.prepare_simultaneous_store_group(instructions, cursor, end_index)
         if opname in LOCAL_STORE_RUN_OPS:
             self.prepare_local_store_run(instructions, cursor, end_index)
+
         return None
 
     def try_translate_match_or_with_statement(
@@ -738,6 +998,10 @@ class NativeDecompiler(
         with_region = self.try_translate_with(instructions, cursor, end_index)
         if with_region is not None:
             return with_region
+        # a match statement compiles from 3.10 on
+        if self.version is not None and self.version < (3, 10):
+            return None
+
         return self.try_translate_simple_match(
             instructions,
             offset_to_index,
@@ -771,6 +1035,7 @@ class NativeDecompiler(
         child = self.make_child()
         child.pop_or_none()
         child.translate_range(instructions, cursor + 1, target_index)
+
         if not child.stack:
             return None
 
@@ -800,12 +1065,15 @@ class NativeDecompiler(
         other_index = offset_to_index.get(jump.argval)
         if not self.stack or other_index is None or other_index >= end_index:
             return None
+
         last_index = previous_non_metadata_index(instructions, other_index - 1)
         if last_index is None or last_index <= cursor:
             return None
+
         last = instructions[last_index]
         if last.opname != OR_POP_AFTER_TEST[jump.opname]:
             return None
+
         join_index = offset_to_index.get(last.argval)
         if join_index is None or not other_index < join_index <= end_index:
             return None
@@ -814,6 +1082,7 @@ class NativeDecompiler(
         other = self.evaluate_value_behind_test(instructions, other_index, join_index)
         if group is None or other is None:
             return None
+
         group.insert(0, self.expression_from_stack_value(self.pop_or_none()))
         inner: ast.boolop = ast.And() if is_false_jump(jump.opname) else ast.Or()
         outer: ast.boolop = ast.Or() if is_false_jump(jump.opname) else ast.And()
@@ -838,13 +1107,16 @@ class NativeDecompiler(
             )
             if not same_test and index != last_index:
                 continue
+
             operand = self.evaluate_short_circuit_operand(
                 instructions, start_index, index, instructions[last_index]
             )
             if operand is None:
                 return None
+
             operands.append(operand)
             start_index = index + 1
+
         return operands
 
     def evaluate_short_circuit_operand(
@@ -855,6 +1127,7 @@ class NativeDecompiler(
         last: Instruction,
     ) -> ast.expr | None:
         values: list[ast.expr] = []
+
         for index in range(start_index, end_index + 1):
             instruction = instructions[index]
             leaves = instruction.opname == last.opname and instruction.argval == (
@@ -862,13 +1135,17 @@ class NativeDecompiler(
             )
             if not leaves and index != end_index:
                 continue
+
             value = self.evaluate_value_behind_test(instructions, start_index, index)
             if value is None:
                 return None
+
             values.append(value)
             start_index = index + 1
+
         if len(values) == 1:
             return values[0]
+
         operator: ast.boolop = ast.Or() if "TRUE" in last.opname else ast.And()
         return ast.BoolOp(op=operator, values=values)
 
@@ -884,6 +1161,7 @@ class NativeDecompiler(
         statements = child.translate_range(instructions, start_index, end_index)
         if statements or len(child.stack) != depth + 1:
             return None
+
         self.warnings.extend(child.warnings)
         return child.expression_from_stack_value(child.stack[-1])
 
@@ -893,11 +1171,31 @@ class NativeDecompiler(
         cursor: int,
         end_index: int,
     ) -> None:
-        count = int(instructions[cursor].arg or 0)
+        opname = instructions[cursor].opname
+        count = ROTATION_SWAPS.get(opname) or int(instructions[cursor].arg or 0)
+        stores_start = cursor + 1
+
+        if (
+            opname == "ROT_TWO"
+            and cursor
+            and instructions[cursor - 1].opname == "ROT_THREE"
+        ):
+            return
+
+        if opname == "ROT_THREE":
+            if (
+                stores_start >= end_index
+                or instructions[stores_start].opname != "ROT_TWO"
+            ):
+                return
+
+            stores_start += 1
+
         if count < 2:
             return
-        if not has_following_stores(instructions, cursor + 1, end_index, count):
+        if not has_following_stores(instructions, stores_start, end_index, count):
             return
+
         self.simultaneous_store_group += 1
         self.pending_simultaneous_store_count = count
         self.simultaneous_store_reversed = False
@@ -910,14 +1208,17 @@ class NativeDecompiler(
     ) -> None:
         if self.pending_simultaneous_store_count > 0:
             return
+
         count = count_local_store_run(instructions, cursor, end_index)
         if count < 2 or len(self.stack) < count:
             return
+
         values = self.stack[-count:]
         if not all(isinstance(value, ast.expr) for value in values):
             return
         if len({id(value) for value in values}) != count:
             return
+
         self.simultaneous_store_group += 1
         self.pending_simultaneous_store_count = count
         self.simultaneous_store_reversed = True
@@ -949,6 +1250,9 @@ class NativeDecompiler(
                 cursor,
                 end_index,
             )
+        if is_conditional_jump_name(opname):
+            return self.try_translate_loop_head_test(instructions, cursor, end_index)
+
         return None
 
     def loop_branch_handler(
@@ -958,7 +1262,6 @@ class NativeDecompiler(
             "GET_ITER": self.try_translate_iter_loop,
             "GET_AITER": self.try_translate_async_iter_loop,
             "SETUP_LOOP": self.try_translate_while_loop,
-            "FOR_LOOP": self.try_translate_legacy_for_loop,
         }.get(opname)
 
     def try_translate_iter_loop(
@@ -976,6 +1279,7 @@ class NativeDecompiler(
         )
         if advanced is not None:
             return advanced
+
         return self.try_translate_for_loop(
             instructions,
             offset_to_index,
@@ -998,6 +1302,7 @@ class NativeDecompiler(
         )
         if advanced is not None:
             return advanced
+
         return self.try_translate_async_for_loop(
             instructions,
             offset_to_index,
@@ -1011,12 +1316,32 @@ def decompile_native_source(
     version: tuple[int, ...] | None,
     progress: ProgressCallback | None = None,
 ) -> NativeResult | None:
-    return NativeDecompiler(
-        code=code,
-        version=version,
-        is_module=True,
-        progress=progress,
-    ).decompile()
+    result = decompile_body(
+        lambda module_code: NativeDecompiler(
+            code=module_code, version=version, progress=progress
+        ),
+        code,
+    )
+    if result is None or result.source is not None:
+        return result
+
+    emit_progress(progress, "checking the text of each scope on its own")
+    return decompile_body(
+        lambda module_code: NativeDecompiler(
+            code=module_code, version=version, checks_scopes=True
+        ),
+        code,
+    )
+
+
+def written_python(module: ast.Module) -> str | None:
+    try:
+        source = unparse_keeping_lines(module) + "\n"
+        ast.parse(source)
+    except Exception:
+        return None
+
+    return source
 
 
 def restore_else_before_shared_return(
@@ -1024,21 +1349,26 @@ def restore_else_before_shared_return(
     code: Any,
 ) -> list[ast.stmt]:
     numbers = constant_numbers(code)
+
     for index in range(len(body) - 2, -1, -1):
         statement = body[index]
         if not isinstance(statement, ast.If) or not is_constant_return(body[-1]):
             continue
+
         statement = merged_nested_if(statement)
         if not ends_in_same_return(statement, body[-1], numbers):
             continue
+
         earlier = statement_constant_numbers([*body[:index], statement], numbers)
         between = statement_constant_numbers(body[index + 1 : -1], numbers) - earlier
         returned = statement_constant_numbers([body[-1]], numbers)
         if not between or not returned or min(returned) < max(between):
             continue
+
         statement.body = statement.body[:-1]
         statement.orelse = body[index + 1 : -1]
         body = [*body[:index], statement, body[-1]]
+
     return body
 
 
@@ -1047,16 +1377,20 @@ def merged_nested_if(statement: ast.If) -> ast.If:
         inner = statement.body[0]
         if not isinstance(inner, ast.If) or inner.orelse:
             break
+
         test = ast.BoolOp(op=ast.And(), values=[statement.test, inner.test])
         statement = ast.If(test=test, body=inner.body, orelse=[])
+
     return statement
 
 
 def constant_numbers(code: Any) -> dict[tuple[type, Any], int]:
     numbers: dict[tuple[type, Any], int] = {}
-    for number, value in enumerate(getattr(code, "co_consts", ())):
+    constants: tuple[object, ...] = getattr(code, "co_consts", ())
+    for number, value in enumerate(constants):
         if isinstance(value, (str, bytes, int, float, bool)):
             numbers.setdefault((type(value), value), number)
+
     return numbers
 
 
@@ -1073,9 +1407,11 @@ def ends_in_same_return(
 ) -> bool:
     if statement.orelse or len(statement.body) < 2:
         return False
+
     tail = statement.body[-1]
     if not is_constant_return(tail):
         return False
+
     return statement_constant_numbers([tail], numbers) == statement_constant_numbers(
         [last], numbers
     )
@@ -1086,13 +1422,16 @@ def statement_constant_numbers(
     numbers: dict[tuple[type, Any], int],
 ) -> set[int]:
     found: set[int] = set()
+
     for statement in statements:
         for node in ast.walk(statement):
             if not isinstance(node, ast.Constant):
                 continue
+
             number = numbers.get((type(node.value), node.value))
             if number is not None:
                 found.add(number)
+
     return found
 
 
@@ -1110,12 +1449,27 @@ def add_dead_yield(body: list[ast.stmt], code: Any) -> list[ast.stmt]:
         for node in walk_current_scope_nodes(body)
     ):
         return body
+
     dead = ast.If(
         test=ast.Constant(value=False),
         body=[ast.Expr(value=ast.Yield(value=None))],
         orelse=[],
     )
     return [dead, *body]
+
+
+def bare_generator_returns(body: list[ast.stmt], code: Any) -> None:
+    flags = int(getattr(code, "co_flags", 0) or 0)
+    if not flags & CO_GENERATOR:
+        return
+
+    for node in walk_current_scope_nodes(body):
+        if (
+            isinstance(node, ast.Return)
+            and isinstance(node.value, ast.Constant)
+            and node.value.value is None
+        ):
+            node.value = None
 
 
 def add_missing_local_initializers(
@@ -1127,13 +1481,16 @@ def add_missing_local_initializers(
     if not missing:
         return body
 
-    initializers = [
-        ast.Assign(
+    initializers: list[ast.stmt] = []
+
+    for name in sorted(missing):
+        initializer = ast.Assign(
             targets=[ast.Name(id=name, ctx=ast.Store())],
             value=ast.Constant(value=None),
         )
-        for name in sorted(missing)
-    ]
+        setattr(initializer, ADDED_INITIALIZER, True)
+        initializers.append(initializer)
+
     return [*initializers, *body]
 
 
@@ -1161,11 +1518,13 @@ def missing_loaded_stored_locals(
 
     loaded: set[str] = set()
     assigned: set[str] = set()
+
     for node in walk_current_scope_nodes(body):
         if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
             loaded.add(node.id)
         else:
             assigned.update(names_bound_by(node))
+
     missing = (loaded & bytecode_stores & local_names) - assigned
     return missing - parameter_names(code)
 
@@ -1189,6 +1548,7 @@ def names_bound_by(node: ast.AST) -> tuple[str, ...]:
         return (node.name,) if node.name is not None else ()
     if isinstance(node, ast.MatchMapping) and node.rest is not None:
         return (node.rest,)
+
     return ()
 
 
@@ -1198,6 +1558,7 @@ def walk_current_scope_nodes(body: list[ast.stmt]) -> list[ast.AST]:
     while work:
         node = work.pop()
         nodes.append(node)
+
         if isinstance(
             node,
             (
@@ -1212,12 +1573,16 @@ def walk_current_scope_nodes(body: list[ast.stmt]) -> list[ast.AST]:
             ),
         ):
             continue
+
         work.extend(reversed(list(ast.iter_child_nodes(node))))
+
     return nodes
 
 
 CO_FUTURE_UNICODE_LITERALS = 0x20000
 
+# before 3.11 a, b = x, y and a, b, c = x, y, z swap with these
+ROTATION_SWAPS = {"ROT_TWO": 2, "ROT_THREE": 3}
 STORE_TARGET_PREFIX_OPS = {
     "BINARY_OP",
     "BINARY_SUBSCR",
@@ -1251,6 +1616,7 @@ def has_following_stores(
     count: int,
 ) -> bool:
     stores = 0
+
     for index in range(start_index, end_index):
         opname = instructions[index].opname
         if opname in SIMULTANEOUS_STORE_OPS:
@@ -1258,9 +1624,12 @@ def has_following_stores(
             if stores == count:
                 return True
             continue
+
         if opname in STORE_TARGET_PREFIX_OPS:
             continue
+
         return False
+
     return False
 
 
@@ -1270,16 +1639,29 @@ def count_local_store_run(
     end_index: int,
 ) -> int:
     stores = 0
+
     for index in range(start_index, end_index):
         opname = instructions[index].opname
         if opname in LOCAL_STORE_RUN_OPS:
             stores += LOCAL_STORE_RUN_OPS[opname]
         elif opname != "CACHE":
             break
+
     return stores
 
 
-GLOBAL_CHAIN_PREFIX_OPS = {"CACHE", "EXTENDED_ARG", "NOP", "SET_LINENO"}
+# a function's set-up instructions sit on its def line, not its first statement's
+PROLOGUE_OPS = frozenset(
+    {
+        "CACHE",
+        "COPY_FREE_VARS",
+        "EXTENDED_ARG",
+        "MAKE_CELL",
+        "RESUME",
+        "RETURN_GENERATOR",
+    }
+)
+GLOBAL_CHAIN_PREFIX_OPS = {"CACHE", "EXTENDED_ARG", "NOP"}
 STORE_CHAIN_OPS = {
     "STORE_ATTR",
     "STORE_DEREF",
@@ -1296,9 +1678,11 @@ def none_return_start(instructions: list[Instruction], cursor: int) -> int | Non
         return cursor if instruction.argval is None else None
     if instruction.opname != "RETURN_VALUE" or cursor == 0:
         return None
+
     load = instructions[cursor - 1]
     if load.opname == "LOAD_CONST" and load.argval is None:
         return cursor - 1
+
     return None
 
 
@@ -1327,6 +1711,7 @@ def should_skip_dead_jump_after_terminal(
         return False
     if not is_terminal_op(instructions[cursor - 1].opname):
         return False
+
     return is_jump_op(instruction.opname)
 
 
@@ -1339,6 +1724,7 @@ def should_skip_generator_prologue_pop(
         return False
     if instructions[cursor].opname != "POP_TOP":
         return False
+
     return instructions[start_index].opname == "RETURN_GENERATOR"
 
 
@@ -1350,7 +1736,6 @@ def should_skip_iterator_cleanup_before_return(
     instruction = instructions[cursor]
     if instruction.opname == "SWAP":
         return should_skip_swap_iterator_cleanup(instructions, cursor, claimed_ranges)
-
     if instruction.opname != "POP_TOP":
         return False
 
@@ -1373,13 +1758,16 @@ def returns_after_handler_cleanup(
     return_index = next_non_metadata_index(instructions, cursor)
     if return_index is None:
         return False
+
     return_index = claimed_ranges.get(return_index, return_index)
     if instructions[return_index].opname == "SWAP":
         if return_index + 2 >= len(instructions):
             return False
         if instructions[return_index + 1].opname != "POP_EXCEPT":
             return False
+
         return_index += 2
+
     return instructions[return_index].opname in {"RETURN_VALUE", "RETURN_CONST"}
 
 
@@ -1437,6 +1825,7 @@ def should_skip_unreachable_after_terminal(
             return False
         if is_terminal_op(instruction.opname):
             return True
+
     return False
 
 
@@ -1448,18 +1837,21 @@ def is_after_implicit_module_return(
 ) -> bool:
     if cursor <= start_index:
         return False
+
     previous_index = previous_non_metadata_index(instructions, cursor - 1)
     if previous_index is None:
         return False
+
     previous = instructions[previous_index]
+
     if version is not None and version >= (3, 14) and previous_index > start_index:
         loaded = instructions[previous_index - 1]
         return (
             previous.opname == "RETURN_VALUE"
             and loaded.opname == "LOAD_CONST"
             and loaded.argval is None
-            and loaded.arg is not None
         )
+
     return previous.opname == "RETURN_CONST" and previous.argval is None
 
 
@@ -1470,6 +1862,7 @@ def is_trailing_inline_cleanup(
 ) -> bool:
     if cursor <= start_index or instructions[cursor - 1].opname != "RERAISE":
         return False
+
     return instructions[-1].opname == "RERAISE" and all(
         instruction.opname in INLINE_CLEANUP_OPS
         for instruction in instructions[cursor:]
@@ -1484,6 +1877,7 @@ def should_skip_returning_with_cleanup_after_terminal(
 ) -> int | None:
     if cursor <= start_index:
         return None
+
     previous_index = previous_non_metadata_index(instructions, cursor - 1)
     if previous_index is None:
         return None
@@ -1493,32 +1887,26 @@ def should_skip_returning_with_cleanup_after_terminal(
     skipped = skip_returning_with_exception_handler(instructions, cursor, end_index)
     if skipped == cursor:
         return None
+
     return skipped
-
-
-def previous_non_metadata_index(
-    instructions: list[Instruction],
-    cursor: int,
-) -> int | None:
-    while cursor >= 0:
-        if instructions[cursor].opname not in {"CACHE", "SET_LINENO", "NOP"}:
-            return cursor
-        cursor -= 1
-    return None
 
 
 def find_loaded_global_store_sources(instructions: list[Instruction]) -> list[str]:
     names: list[str] = []
+
     for index, instruction in enumerate(instructions):
         if instruction.opname != "LOAD_GLOBAL":
             continue
+
         next_index = next_non_metadata_index(instructions, index + 1)
         if next_index is None:
             continue
+
         if starts_global_store_chain(instructions, next_index):
             name = str(instruction.argval)
             if name not in names:
                 names.append(name)
+
     return names
 
 
@@ -1538,6 +1926,7 @@ def spell_while_one(
     )
     if one is None:
         return
+
     first_use = {
         index: offset
         for index, offset in first_constant_uses(instructions).items()
@@ -1554,6 +1943,7 @@ def spell_while_one(
         start = getattr(loop, "_pyc2py_loop_offset")
         if start >= used_at:
             return
+
         earlier = [use for index, use in first_use.items() if index < one]
         later = [use for index, use in first_use.items() if index > one]
         if all(use < start for use in earlier) and any(
@@ -1565,11 +1955,13 @@ def spell_while_one(
 
 def first_constant_uses(instructions: list[Instruction]) -> dict[int, int]:
     uses: dict[int, int] = {}
+
     for instruction in instructions:
         if instruction.opname in {"LOAD_CONST", "RETURN_CONST"} and (
             instruction.arg is not None
         ):
             uses.setdefault(instruction.arg, instruction.offset)
+
     return uses
 
 
@@ -1577,12 +1969,12 @@ def find_line_break_offsets(
     instructions: list[Instruction],
     version: tuple[int, ...] | None,
 ) -> dict[int, tuple[str, ...]]:
-    # where the source ended a line in the middle of a statement, as far as
-    # the bytecode of python 3.13 shows it: per instruction, the kind of break
-    # before each value it pushes
+    # where the source broke a statement's line, as 3.13 bytecode shows it
     if version is None or version < (3, 13):
         return {}
+
     breaks: dict[int, tuple[str, ...]] = {}
+
     for index, instruction in enumerate(instructions[1:], start=1):
         if instruction.opname == "LOAD_FAST":
             kind = local_load_line_break(instructions[index - 1], instruction)
@@ -1592,6 +1984,7 @@ def find_line_break_offsets(
             kinds = default_line_breaks(instructions, index)
             if any(kinds):
                 breaks[instruction.offset] = kinds
+
     return breaks
 
 
@@ -1602,6 +1995,7 @@ def local_load_line_break(first: Instruction, second: Instruction) -> str:
         return ""
     if first.opname == "LOAD_FAST":
         return LINE_BREAK_ALWAYS
+
     return LINE_BREAK_IN_COMPREHENSION
 
 
@@ -1609,15 +2003,19 @@ def default_line_breaks(
     instructions: list[Instruction],
     index: int,
 ) -> tuple[str, ...]:
-    values = instructions[index].argval
-    if not isinstance(values, tuple) or not feeds_make_function(instructions, index):
+    argval = instructions[index].argval
+    if not isinstance(argval, tuple) or not feeds_make_function(instructions, index):
         return ()
+
+    values = cast("tuple[object, ...]", argval)
     first = index
     while first > 0 and instructions[first - 1].opname == "NOP":
         first -= 1
+
     lines = index - first
     if not 0 < lines <= len(values):
         return ()
+
     def_line = instructions[index].starts_line or instructions[index - 1].starts_line
     starts_below = instructions[first].starts_line not in {None, def_line}
     kinds = [LINE_BREAK_ALWAYS if starts_below else ""]
@@ -1646,12 +2044,14 @@ def feeds_make_function(instructions: list[Instruction], index: int) -> bool:
             return True
         if instruction.opname not in FUNCTION_PART_OPS:
             return False
+
     return False
 
 
 def is_unjoined_local(instruction: Instruction) -> bool:
     if instruction.opname not in {"LOAD_FAST", "STORE_FAST"}:
         return False
+
     return instruction.arg is not None and instruction.arg < 16
 
 
@@ -1667,9 +2067,11 @@ def find_implicit_return_offsets(
     line: int | None = None
     shared_lines: set[int | None] = set()
     returns: list[tuple[int, int | None]] = []
+
     for index, instruction in enumerate(instructions):
         if instruction.starts_line is not None:
             line = instruction.starts_line
+
         if instruction.opname == "RETURN_CONST" and instruction.argval is None:
             returns.append((instruction.offset, line))
         elif not return_const and is_none_return_load(instructions, index):
@@ -1682,12 +2084,14 @@ def find_implicit_return_offsets(
             and is_none_return_load(instructions, index - 1)
         ):
             shared_lines.add(line)
+
     return frozenset(offset for offset, line in returns if line in shared_lines)
 
 
 def is_none_return_load(instructions: list[Instruction], index: int) -> bool:
     if index + 1 >= len(instructions):
         return False
+
     load = instructions[index]
     return (
         load.opname == "LOAD_CONST"
@@ -1708,27 +2112,37 @@ def find_explicit_nonlocal_names(
     code: Any,
     instructions: list[Instruction],
 ) -> list[str]:
-    freevars = set(getattr(code, "co_freevars", ()) or ())
+    freevars: set[str] = set(getattr(code, "co_freevars", ()) or ())
     if not freevars:
         return []
 
     names: list[str] = []
+
     for instruction in instructions:
         if instruction.opname not in {"DELETE_DEREF", "STORE_DEREF"}:
             continue
+
         name = str(instruction.argval)
         if name in freevars and name not in names:
             names.append(name)
+
     return names + unused_free_names(code, instructions)
 
 
 def unused_free_names(code: Any, instructions: list[Instruction]) -> list[str]:
     used: set[object] = set()
+
     for instruction in instructions:
         argval = instruction.argval
-        used.update(argval if isinstance(argval, tuple) else (argval,))
+        if isinstance(argval, tuple):
+            used.update(cast("tuple[object, ...]", argval))
+        else:
+            used.update((argval,))
+
     return [
-        str(name) for name in getattr(code, "co_freevars", ()) or () if name not in used
+        str(name)
+        for name in getattr(code, "co_freevars", ()) or ()
+        if name not in used and name != "__class__"
     ]
 
 
@@ -1742,7 +2156,9 @@ def starts_global_store_chain(
             continue
         if opname == "DUP_TOP":
             continue
+
         return opname == "STORE_GLOBAL"
+
     return False
 
 
@@ -1753,6 +2169,7 @@ def next_non_metadata_index(
     for index in range(start_index, len(instructions)):
         if instructions[index].opname not in GLOBAL_CHAIN_PREFIX_OPS:
             return index
+
     return None
 
 
@@ -1768,28 +2185,34 @@ def find_undeclared_module_globals(
         for name in node.names
     }
     names: list[str] = []
+
     for instruction in instructions:
         name = str(instruction.argval)
         if instruction.opname != "STORE_GLOBAL" or name in declared:
             continue
         if name not in names:
             names.append(name)
+
     return names
 
 
 def find_module_explicit_global_names(instructions: list[Instruction]) -> list[str]:
     names: list[str] = []
     chain: list[Instruction] = []
+
     for instruction in instructions:
         if instruction.opname in GLOBAL_CHAIN_PREFIX_OPS:
             continue
         if instruction.opname == "DUP_TOP":
             continue
+
         if instruction.opname in STORE_CHAIN_OPS:
             chain.append(instruction)
             continue
+
         add_mixed_store_global_names(names, chain)
         chain = []
+
     add_mixed_store_global_names(names, chain)
     return names
 
@@ -1800,12 +2223,15 @@ def add_mixed_store_global_names(
 ) -> None:
     if not chain:
         return
+
     has_name_store = any(instruction.opname == "STORE_NAME" for instruction in chain)
     if not has_name_store:
         return
+
     for instruction in chain:
         if instruction.opname != "STORE_GLOBAL":
             continue
+
         name = str(instruction.argval)
         if name not in names:
             names.append(name)

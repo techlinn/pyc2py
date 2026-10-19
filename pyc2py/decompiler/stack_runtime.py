@@ -5,6 +5,12 @@ from pyc2py.decompiler.context import DecompilerContext
 
 
 class StackRuntimeMixin(DecompilerContext, ABC):
+    def push_empty_list_under_top(self) -> None:
+        # PyPy starts a list comprehension with the iterable left on top
+        top = self.pop_or_none()
+        self.stack.append(ast.List(elts=[], ctx=ast.Load()))
+        self.stack.append(top)
+
     def duplicate_top(self) -> None:
         if not self.stack:
             self.warnings.append("DUP_TOP on empty stack")
@@ -23,6 +29,19 @@ class StackRuntimeMixin(DecompilerContext, ABC):
         first, second = self.stack[-2], self.stack[-1]
         self.stack.append(first)
         self.stack.append(second)
+
+    def duplicate_top_items(self, count: int) -> None:
+        # DUP_TOPX before 3.2
+        if count < 1 or len(self.stack) < count:
+            self.warnings.append(f"DUP_TOPX {count} on shallow stack")
+
+            for _ in range(max(count, 0)):
+                self.stack.append(ast.Constant(value=None))
+
+            return
+
+        for _ in range(count):
+            self.stack.copy_from_top(count - 1)
 
     def copy_stack_item(self, opcode_depth: int) -> None:
         if opcode_depth < 1:
@@ -53,6 +72,7 @@ class StackRuntimeMixin(DecompilerContext, ABC):
     def rotate_stack(self, count: int) -> None:
         if count < 2:
             return
+
         if len(self.stack) < count:
             self.warnings.append(f"ROT_{count} on shallow stack")
             return
@@ -87,4 +107,5 @@ class StackRuntimeMixin(DecompilerContext, ABC):
         warning = "bytecode stack underflow; inserted None placeholder"
         if warning not in self.warnings:
             self.warnings.append(warning)
+
         return ast.Constant(value=None)

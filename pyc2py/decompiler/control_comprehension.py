@@ -14,11 +14,16 @@ from pyc2py.decompiler.recover import (
     make_list_comp,
     make_set_comp,
 )
-from pyc2py.decompiler.runtime import HiddenLocalRestore, coerce_expr
+from pyc2py.decompiler.runtime import (
+    HiddenLocalRestore,
+    coerce_expr,
+    map_add_key_is_on_top,
+)
 from pyc2py.decompiler.structures import (
     find_for_loop_pattern,
     find_loop_back_jump,
     invert_condition,
+    is_conditional_jump_name,
     is_forward_conditional_jump,
 )
 
@@ -39,6 +44,8 @@ class InlinedComprehensionShape:
     for_iter: Instruction
     for_iter_index: int
     loop_end_index: int
+    # 3.15 builds the result before GET_ITER
+    built_before_iter: bool = False
 
 
 INLINE_CLEANUP_OPS = frozenset({"SWAP", "POP_TOP", "STORE_FAST", "RERAISE"})
@@ -51,9 +58,11 @@ def skip_inline_cleanup_handler(
 ) -> int:
     if after_index >= len(instructions):
         return after_index
+
     jump = instructions[after_index]
     if jump.opname != "JUMP_FORWARD":
         return after_index
+
     join_index = offset_to_index.get(int(jump.argval))
     if join_index is None or instructions[join_index - 1].opname != "RERAISE":
         return after_index
@@ -62,6 +71,7 @@ def skip_inline_cleanup_handler(
         for instruction in instructions[after_index + 1 : join_index]
     ):
         return after_index
+
     return join_index
 
 
@@ -73,6 +83,7 @@ class AsyncInlinedComprehensionShape:
     get_anext_index: int
     body_start_index: int
     loop_end_index: int
+    built_before_iter: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,6 +107,7 @@ def is_valid_inlined_first_swap(
 ) -> bool:
     if instruction.opname != "SWAP":
         return False
+
     return instruction.arg in {2, save_count + 1}
 
 
@@ -112,6 +124,7 @@ class ControlComprehensionRecoveryMixin(DecompilerContext, ABC):
     ) -> int | None:
         if not self.stack:
             return None
+
         container = self.stack[-1]
         if not is_empty_list_literal(container):
             return None
@@ -162,16 +175,16 @@ class ControlComprehensionRecoveryMixin(DecompilerContext, ABC):
         )
         if nested is not None:
             nested_get_iter, nested_body_start, nested_after, nested_generator = nested
-            if nested_after != end_index:
-                return None
-            return self.make_legacy_list_comprehension(
-                instructions,
-                offset_to_index,
-                nested_body_start,
-                end_index - 1,
-                int(instructions[nested_get_iter + 1].offset),
-                [*generators, nested_generator],
-            )
+            # e.g. [[j for j in x] for x in y]
+            if nested_after == end_index:
+                return self.make_legacy_list_comprehension(
+                    instructions,
+                    offset_to_index,
+                    nested_body_start,
+                    end_index - 1,
+                    int(instructions[nested_get_iter + 1].offset),
+                    [*generators, nested_generator],
+                )
 
         update_index = self.find_legacy_list_append_update(
             instructions,
@@ -185,6 +198,7 @@ class ControlComprehensionRecoveryMixin(DecompilerContext, ABC):
         element = self.evaluate_expression_range(instructions, cursor, update_index)
         if element is None:
             return None
+
         return make_list_comp(element, generators)
 
     def find_legacy_list_append_update(
@@ -207,6 +221,7 @@ class ControlComprehensionRecoveryMixin(DecompilerContext, ABC):
             return None
         if int(update.arg or 0) != generator_count + 1:
             return None
+
         return update_index
 
     def add_legacy_comprehension_conditions(
@@ -227,6 +242,7 @@ class ControlComprehensionRecoveryMixin(DecompilerContext, ABC):
             )
             if condition_index is None:
                 return cursor
+
             condition = self.evaluate_expression_range(
                 instructions,
                 cursor,
@@ -236,8 +252,10 @@ class ControlComprehensionRecoveryMixin(DecompilerContext, ABC):
                 return cursor
             if "IF_TRUE" in instructions[condition_index].opname:
                 condition = invert_condition(condition)
+
             generator.ifs.append(condition)
             cursor = condition_index + 1
+
         return cursor
 
     def find_legacy_condition_jump(
@@ -260,7 +278,9 @@ class ControlComprehensionRecoveryMixin(DecompilerContext, ABC):
                 continue
             if instruction.argval != loop_offset:
                 continue
+
             return index
+
         return None
 
     def find_nested_legacy_comprehension_loop(
@@ -273,6 +293,7 @@ class ControlComprehensionRecoveryMixin(DecompilerContext, ABC):
         for get_iter_index in range(start_index, end_index):
             if instructions[get_iter_index].opname != "GET_ITER":
                 continue
+
             pattern = find_for_loop_pattern(
                 instructions,
                 offset_to_index,
@@ -281,6 +302,7 @@ class ControlComprehensionRecoveryMixin(DecompilerContext, ABC):
             )
             if pattern is None:
                 continue
+
             iterable = self.evaluate_expression_range(
                 instructions,
                 start_index,
@@ -288,6 +310,7 @@ class ControlComprehensionRecoveryMixin(DecompilerContext, ABC):
             )
             if iterable is None:
                 return None
+
             target, body_start = self.read_for_loop_target(
                 instructions,
                 pattern.for_iter_index + 1,
@@ -295,8 +318,10 @@ class ControlComprehensionRecoveryMixin(DecompilerContext, ABC):
             )
             if target is None:
                 return None
+
             generator = make_generator(target=target, iterator=iterable)
             return get_iter_index, body_start, pattern.after_index, generator
+
         return None
 
     def try_translate_inlined_comprehension(
@@ -318,9 +343,16 @@ class ControlComprehensionRecoveryMixin(DecompilerContext, ABC):
         body = self.read_inlined_comprehension_body(instructions, shape)
         if body is None:
             return None
+        if not self.take_iterable_from_setup(shape):
+            return None
 
         iterable = coerce_expr(self.pop_or_none())
+
+        if shape.built_before_iter:
+            self.pop_many_raw(1 + len(shape.save_instructions))
+
         outer_generator = make_generator(target=body.target, iterator=iterable)
+
         if body.update_index is None:
             comprehension = self.make_nested_inlined_comprehension(
                 instructions,
@@ -341,11 +373,13 @@ class ControlComprehensionRecoveryMixin(DecompilerContext, ABC):
                 [outer_generator],
                 int(shape.for_iter.offset),
             )
+
         if comprehension is None:
             return None
 
         for save_instruction in reversed(shape.save_instructions):
             self.stack.append(HiddenLocalRestore(name=str(save_instruction.argval)))
+
         self.stack.append(comprehension)
         after_index = shape.loop_end_index + 1
         if (
@@ -355,7 +389,22 @@ class ControlComprehensionRecoveryMixin(DecompilerContext, ABC):
             and instructions[after_index].opname == "POP_TOP"
         ):
             after_index += 1
+
         return skip_inline_cleanup_handler(instructions, offset_to_index, after_index)
+
+    def take_iterable_from_setup(
+        self, shape: InlinedComprehensionShape | AsyncInlinedComprehensionShape
+    ) -> bool:
+        if not shape.built_before_iter:
+            return True
+        if len(self.stack) < len(shape.save_instructions) + 2:
+            return False
+
+        result = coerce_expr(self.stack[-2])
+        if isinstance(result, ast.Dict):
+            return not result.keys
+
+        return isinstance(result, ast.List | ast.Set) and not result.elts
 
     def make_function_comprehension(
         self,
@@ -376,6 +425,7 @@ class ControlComprehensionRecoveryMixin(DecompilerContext, ABC):
         )
         if build is None or loop_end_index is None:
             return None
+
         shape = InlinedComprehensionShape(
             save_instructions=(),
             build_instruction=build,
@@ -386,7 +436,9 @@ class ControlComprehensionRecoveryMixin(DecompilerContext, ABC):
         body = self.read_inlined_comprehension_body(instructions, shape)
         if body is None:
             return None
+
         generators = [make_generator(target=body.target, iterator=iterable)]
+
         if body.update_index is None:
             return self.make_nested_inlined_comprehension(
                 instructions,
@@ -397,6 +449,7 @@ class ControlComprehensionRecoveryMixin(DecompilerContext, ABC):
                 generators,
                 int(for_iter.offset),
             )
+
         return self.make_inlined_comprehension(
             instructions,
             offset_to_index,
@@ -427,11 +480,13 @@ class ControlComprehensionRecoveryMixin(DecompilerContext, ABC):
             instructions, get_anext_index, end_index
         ):
             return None
+
         end_send_index = self.async_inlined_end_send_index(
             instructions, offset_to_index, get_anext_index, end_index
         )
         if end_send_index is None:
             return None
+
         target, body_start = self.read_for_loop_target(
             instructions, end_send_index + 1, end_index
         )
@@ -441,11 +496,13 @@ class ControlComprehensionRecoveryMixin(DecompilerContext, ABC):
         )
         if target is None or back_jump_index is None:
             return None
+
         update_index = self.find_inlined_comprehension_update(
             instructions, build, body_start, back_jump_index
         )
         if update_index is None:
             return None
+
         return self.make_inlined_comprehension(
             instructions,
             offset_to_index,
@@ -526,8 +583,14 @@ class ControlComprehensionRecoveryMixin(DecompilerContext, ABC):
         )
         if update_index is None:
             return None
+        if not self.take_iterable_from_setup(shape):
+            return None
 
         iterable = coerce_expr(self.pop_or_none())
+
+        if shape.built_before_iter:
+            self.pop_many_raw(1 + len(shape.save_instructions))
+
         generator = make_generator(target=target, iterator=iterable, is_async=True)
         comprehension = self.make_inlined_comprehension(
             instructions,
@@ -543,6 +606,7 @@ class ControlComprehensionRecoveryMixin(DecompilerContext, ABC):
 
         for save_instruction in reversed(shape.save_instructions):
             self.stack.append(HiddenLocalRestore(name=str(save_instruction.argval)))
+
         self.stack.append(comprehension)
         return skip_inline_cleanup_handler(
             instructions, offset_to_index, shape.loop_end_index + 1
@@ -570,6 +634,7 @@ class ControlComprehensionRecoveryMixin(DecompilerContext, ABC):
                 structured[1],
                 generators,
             )
+
         expression_start, conditions = self.read_inlined_comprehension_conditions(
             instructions,
             offset_to_index,
@@ -610,18 +675,23 @@ class ControlComprehensionRecoveryMixin(DecompilerContext, ABC):
             for index in range(body_start, update_index)
         ):
             return None
+
         child = self.make_child()
         child.stack.clear()
         child.loop_continue_offsets = frozenset({loop_offset})
         body = child.translate_range(instructions, body_start, update_index)
         conditions: list[ast.expr] = []
+
         for statement in body:
             condition = condition_kept_by(statement)
             if condition is None:
                 return None
+
             conditions.append(condition)
+
         if not child.stack:
             return None
+
         self.warnings.extend(child.warnings)
         return conditions, child.stack.to_list()
 
@@ -665,6 +735,7 @@ class ControlComprehensionRecoveryMixin(DecompilerContext, ABC):
         nested_loop_end = offset_to_index.get(int(nested_for_iter.argval))
         if nested_loop_end is None:
             return None
+
         nested_back_jump = self.find_inlined_comprehension_back_jump(
             instructions,
             nested_for_iter,
@@ -753,6 +824,7 @@ class ControlComprehensionRecoveryMixin(DecompilerContext, ABC):
                 generator,
                 conditions,
             )
+
         return None
 
     def read_inlined_comprehension_conditions(
@@ -779,10 +851,13 @@ class ControlComprehensionRecoveryMixin(DecompilerContext, ABC):
             )
             if condition is None:
                 continue
+
             expression_start = jumps[count - 1] + 1
             if is_loop_back_jump(instructions[expression_start], loop_offset):
                 expression_start += 1
+
             return expression_start, [condition]
+
         return body_start, []
 
     def find_inlined_comprehension_back_jump(
@@ -799,10 +874,11 @@ class ControlComprehensionRecoveryMixin(DecompilerContext, ABC):
             return None
 
         back_jump = instructions[back_jump_index]
-        if back_jump.opname != "JUMP_BACKWARD":
+        if back_jump.opname not in {"JUMP_ABSOLUTE", "JUMP_BACKWARD", "JUMP"}:
             return None
         if int(back_jump.argval) != for_iter.offset:
             return None
+
         return back_jump_index
 
     def find_inlined_comprehension_update(
@@ -825,6 +901,7 @@ class ControlComprehensionRecoveryMixin(DecompilerContext, ABC):
             build_instruction.opname, update_instruction.opname
         ):
             return None
+
         return update_index
 
     def read_inlined_comprehension_shape(
@@ -843,6 +920,8 @@ class ControlComprehensionRecoveryMixin(DecompilerContext, ABC):
             end_index,
             min_remaining=3,
         )
+        built_before_iter = header is None
+
         if header is None:
             header = self.read_inlined_comprehension_header_before(
                 instructions,
@@ -857,6 +936,7 @@ class ControlComprehensionRecoveryMixin(DecompilerContext, ABC):
             for_iter_index += 1
             if for_iter_index >= end_index:
                 return None
+
         for_iter = instructions[for_iter_index]
         if for_iter.opname != "FOR_ITER":
             return None
@@ -866,12 +946,14 @@ class ControlComprehensionRecoveryMixin(DecompilerContext, ABC):
             return None
         if instructions[loop_end_index].opname != "END_FOR":
             return None
+
         return InlinedComprehensionShape(
             save_instructions=header.save_instructions,
             build_instruction=header.build_instruction,
             for_iter=for_iter,
             for_iter_index=for_iter_index,
             loop_end_index=loop_end_index,
+            built_before_iter=built_before_iter,
         )
 
     def read_async_inlined_comprehension_shape(
@@ -894,10 +976,16 @@ class ControlComprehensionRecoveryMixin(DecompilerContext, ABC):
             end_index,
             min_remaining=4,
         )
+        built_before_iter = header is None
+
+        if header is None:
+            header = self.read_inlined_comprehension_header_before(
+                instructions, cursor, end_index
+            )
         if header is None:
             return None
 
-        get_anext_index = header.cursor + 3
+        get_anext_index = cursor + 1 if built_before_iter else header.cursor + 3
         get_anext = instructions[get_anext_index]
 
         if not self.is_async_inlined_next_sequence(
@@ -931,6 +1019,7 @@ class ControlComprehensionRecoveryMixin(DecompilerContext, ABC):
             get_anext_index=get_anext_index,
             body_start_index=end_send_index + 1,
             loop_end_index=loop_end_index,
+            built_before_iter=built_before_iter,
         )
 
     def async_inlined_end_send_index(
@@ -946,6 +1035,7 @@ class ControlComprehensionRecoveryMixin(DecompilerContext, ABC):
             return None
         if instructions[end_send_index].opname != "END_SEND":
             return None
+
         return end_send_index
 
     def starts_async_inlined_comprehension(
@@ -974,12 +1064,14 @@ class ControlComprehensionRecoveryMixin(DecompilerContext, ABC):
         first_swap = instructions[cursor]
         build_instruction = instructions[cursor + 1]
         second_swap = instructions[cursor + 2]
+
         if not is_valid_inlined_first_swap(first_swap, len(save_instructions)):
             return None
         if second_swap.opname != "SWAP" or second_swap.arg != 2:
             return None
         if build_instruction.opname not in COMPREHENSION_BUILD_OPS:
             return None
+
         return InlinedComprehensionHeader(
             save_instructions=tuple(save_instructions),
             build_instruction=build_instruction,
@@ -994,13 +1086,16 @@ class ControlComprehensionRecoveryMixin(DecompilerContext, ABC):
     ) -> InlinedComprehensionHeader | None:
         if get_iter_index < 4 or get_iter_index > end_index:
             return None
+
         second_swap = instructions[get_iter_index - 1]
         build_instruction = instructions[get_iter_index - 2]
         first_swap = instructions[get_iter_index - 3]
+
         if second_swap.opname != "SWAP" or second_swap.arg != 2:
             return None
         if build_instruction.opname not in COMPREHENSION_BUILD_OPS:
             return None
+
         save_count = 0
         while (
             get_iter_index - 4 - save_count >= 0
@@ -1008,10 +1103,12 @@ class ControlComprehensionRecoveryMixin(DecompilerContext, ABC):
             == "LOAD_FAST_AND_CLEAR"
         ):
             save_count += 1
+
         if save_count == 0:
             return None
         if not is_valid_inlined_first_swap(first_swap, save_count):
             return None
+
         return InlinedComprehensionHeader(
             save_instructions=tuple(
                 instructions[get_iter_index - 3 - save_count : get_iter_index - 3]
@@ -1032,6 +1129,7 @@ class ControlComprehensionRecoveryMixin(DecompilerContext, ABC):
             return False
         if instructions[get_anext_index + 1].opname != "LOAD_CONST":
             return False
+
         return instructions[get_anext_index + 2].opname == "SEND"
 
     def find_async_inlined_comprehension_end(
@@ -1052,12 +1150,14 @@ class ControlComprehensionRecoveryMixin(DecompilerContext, ABC):
         for index in range(back_jump_index + 1, end_index):
             if instructions[index].opname != "END_ASYNC_FOR":
                 continue
+
             following = instructions[index + 1] if index + 1 < end_index else None
             if following is None or following.opname not in {
                 "JUMP_BACKWARD",
                 "JUMP_BACKWARD_NO_INTERRUPT",
             }:
                 return index
+
         return None
 
     def read_inlined_hidden_local_saves(
@@ -1067,15 +1167,19 @@ class ControlComprehensionRecoveryMixin(DecompilerContext, ABC):
         end_index: int,
     ) -> tuple[list[Instruction], int]:
         saves: list[Instruction] = []
+
         for _index in range(32):
             cursor = skip_ignorable_instructions(instructions, cursor, end_index)
             if cursor >= end_index:
                 return saves, cursor
+
             instruction = instructions[cursor]
             if instruction.opname != "LOAD_FAST_AND_CLEAR":
                 return saves, cursor
+
             saves.append(instruction)
             cursor += 1
+
         return [], end_index
 
     def previous_non_ignorable_index(
@@ -1087,7 +1191,9 @@ class ControlComprehensionRecoveryMixin(DecompilerContext, ABC):
         for index in range(start_index, floor_index, -1):
             if instructions[index].opname in NO_VALUE_OPS:
                 continue
+
             return index
+
         return None
 
     def is_matching_comprehension_update(
@@ -1119,29 +1225,43 @@ class ControlComprehensionRecoveryMixin(DecompilerContext, ABC):
         if update_opname in {"LIST_APPEND", "SET_ADD", "YIELD_VALUE"}:
             if not expressions:
                 return None
+
             elt = coerce_expr(expressions[-1])
+
             if update_opname == "YIELD_VALUE":
                 return make_generator_exp(elt, generators)
             if build_opname == "BUILD_LIST":
                 return make_list_comp(elt, generators)
+
             return make_set_comp(elt, generators)
 
         if update_opname in {"LIST_EXTEND", "SET_UPDATE"}:
             if not expressions:
                 return None
+
             elt = ast.Starred(value=coerce_expr(expressions[-1]), ctx=ast.Load())
+
             if update_opname == "LIST_EXTEND":
                 return make_list_comp(elt, generators)
+
             return make_set_comp(elt, generators)
 
         if update_opname == "DICT_UPDATE" and expressions:
             return make_dict_comp(coerce_expr(expressions[-1]), None, generators)
-
         if update_opname == "MAP_ADD" and len(expressions) >= 2:
-            key = coerce_expr(expressions[-2])
-            value = coerce_expr(expressions[-1])
-            return make_dict_comp(key, value, generators)
+            return self.make_map_add_comprehension(expressions, generators)
+
         return None
+
+    def make_map_add_comprehension(
+        self, expressions: list[Any], generators: list[ast.comprehension]
+    ) -> ast.expr:
+        key, value = coerce_expr(expressions[-2]), coerce_expr(expressions[-1])
+
+        if map_add_key_is_on_top(self.version):
+            key, value = value, key
+
+        return make_dict_comp(key, value, generators)
 
     def evaluate_stack_range(
         self,
@@ -1151,6 +1271,7 @@ class ControlComprehensionRecoveryMixin(DecompilerContext, ABC):
     ) -> list[Any]:
         child = self.make_child()
         child.stack.clear()
+        child.evaluating_values = True
         child.translate_range(instructions, start_index, end_index)
         self.warnings.extend(child.warnings)
         return child.stack.to_list()
@@ -1175,6 +1296,7 @@ def find_loop_yield(
 ) -> int | None:
     if pop_index - 2 < body_start:
         return None
+
     names = [item.opname for item in instructions[pop_index - 2 : pop_index + 1]]
     return pop_index - 2 if names == ["YIELD_VALUE", "RESUME", "POP_TOP"] else None
 
@@ -1182,25 +1304,33 @@ def find_loop_yield(
 def condition_kept_by(statement: ast.stmt) -> ast.expr | None:
     if not isinstance(statement, ast.If):
         return None
+
     if not statement.orelse:
         if len(statement.body) == 1 and isinstance(statement.body[0], ast.Continue):
             return invert_condition(statement.test)
+
         return None
+
     kept = [conditions_kept_by(statement.body), conditions_kept_by(statement.orelse)]
     if kept[0] is None or kept[1] is None:
         return None
+
     return ast.IfExp(test=statement.test, body=kept[0], orelse=kept[1])
 
 
 def conditions_kept_by(statements: list[ast.stmt]) -> ast.expr | None:
     values: list[ast.expr] = []
+
     for statement in statements:
         value = condition_kept_by(statement)
         if value is None:
             return None
+
         values.append(value)
+
     if len(values) == 1:
         return values[0]
+
     return ast.BoolOp(op=ast.And(), values=values) if values else None
 
 
@@ -1211,15 +1341,18 @@ def inlined_condition_jumps(
     loop_offset: int,
 ) -> list[int]:
     jumps: list[int] = []
+
     for index in range(start_index, end_index):
         instruction = instructions[index]
         if "JUMP" not in instruction.opname:
             continue
+
         if is_forward_conditional_jump(instruction) or is_loop_back_test(
             instruction, loop_offset
         ):
             jumps.append(index)
             continue
+
         if (
             jumps
             and jumps[-1] == index - 1
@@ -1227,18 +1360,22 @@ def inlined_condition_jumps(
         ):
             continue
         break
+
     return jumps
 
 
 def is_loop_back_test(instruction: Instruction, loop_offset: int) -> bool:
     return (
-        instruction.opname.startswith("POP_JUMP_BACKWARD_IF_")
+        is_conditional_jump_name(instruction.opname)
         and instruction.argval == loop_offset
     )
 
 
 def is_loop_back_jump(instruction: Instruction, loop_offset: int) -> bool:
-    return instruction.opname == "JUMP_BACKWARD" and instruction.argval == loop_offset
+    return (
+        instruction.opname in {"JUMP_ABSOLUTE", "JUMP_BACKWARD", "JUMP"}
+        and instruction.argval == loop_offset
+    )
 
 
 def is_empty_list_literal(value: Any) -> bool:

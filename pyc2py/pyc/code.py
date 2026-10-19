@@ -1,5 +1,10 @@
+import inspect
 from dataclasses import dataclass
-from typing import Any
+from types import CodeType
+from typing import Any, cast
+
+from pyc2py.constants import MAX_CODE_OBJECTS
+from pyc2py.types import is_sequence, is_tuple
 
 
 @dataclass(frozen=True, slots=True)
@@ -24,6 +29,11 @@ class PycCode:
     co_freevars: tuple[Any, ...]
     co_cellvars: tuple[Any, ...]
     co_localsplusnames: tuple[Any, ...]
+    # the opcode module of a compiler that is not CPython's, such as PyPy's
+    opcodes: str = ""
+
+
+type CodeObject = CodeType | PycCode
 
 
 def normalize_code_object(code: Any) -> PycCode:
@@ -58,17 +68,36 @@ def normalize_consts(values: Any) -> tuple[Any, ...]:
 def normalize_const(value: Any) -> Any:
     if has_code_shape(value):
         return normalize_code_object(value)
-    if isinstance(value, tuple):
+    if is_tuple(value):
         return tuple(normalize_const(item) for item in value)
     if isinstance(value, list):
-        return [normalize_const(item) for item in value]
+        return [normalize_const(item) for item in cast("list[Any]", value)]
     if isinstance(value, frozenset):
-        return frozenset(normalize_const(item) for item in value)
+        return frozenset(
+            normalize_const(item) for item in cast("frozenset[Any]", value)
+        )
+
     return value
 
 
 def has_code_shape(value: object) -> bool:
     return hasattr(value, "co_code") and hasattr(value, "co_consts")
+
+
+def code_objects(root: Any | None) -> list[Any]:
+    # the root and every code object under it, in the order the source has them
+    found: list[Any] = []
+    work = [] if root is None else [root]
+    while work:
+        if len(found) >= MAX_CODE_OBJECTS:
+            raise ValueError("the file holds more code objects than pyc2py reads")
+
+        code = work.pop()
+        found.append(code)
+        consts = getattr(code, "co_consts", ()) or ()
+        work.extend(reversed([value for value in consts if has_code_shape(value)]))
+
+    return found
 
 
 def read_int_attr(code: Any, name: str, default: int = 0) -> int:
@@ -95,6 +124,7 @@ def read_qualname(code: Any) -> str:
     value = getattr(code, "co_qualname", None)
     if value:
         return str(value)
+
     return str(getattr(code, "co_name", "") or "")
 
 
@@ -205,12 +235,14 @@ def as_text(value: Any) -> str:
         return value.decode("latin-1", errors="surrogateescape")
     if isinstance(value, str):
         return value
+
     raise ValueError(f"code object field is not text: {type(value).__name__}")
 
 
 def as_tuple(values: Any) -> tuple[Any, ...]:
-    if isinstance(values, (tuple, list)):
+    if is_sequence(values):
         return tuple(values)
+
     raise ValueError(f"code object field is not a tuple: {type(values).__name__}")
 
 
@@ -224,8 +256,13 @@ def split_localsplus(
     local_names: list[Any] = []
     cell_names: list[Any] = []
     free_names: list[Any] = []
+    names, kinds = as_tuple(names), as_bytes(kinds)
+    if len(names) != len(kinds):
+        raise ValueError(
+            f"a code object has {len(kinds)} local kinds for {len(names)} local names"
+        )
 
-    for name, kind in zip(as_tuple(names), as_bytes(kinds), strict=True):
+    for name, kind in zip(names, kinds, strict=True):
         if kind & 0x20:
             local_names.append(name)
         if kind & 0x40:
@@ -234,3 +271,8 @@ def split_localsplus(
             free_names.append(name)
 
     return tuple(local_names), tuple(cell_names), tuple(free_names)
+
+
+def is_coroutine_code(code: Any) -> bool:
+    flags = int(getattr(code, "co_flags", 0) or 0)
+    return bool(flags & (inspect.CO_COROUTINE | inspect.CO_ASYNC_GENERATOR))

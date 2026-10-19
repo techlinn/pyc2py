@@ -2,13 +2,12 @@ import ast
 from abc import ABC
 from typing import Any
 
-from pyc2py.astree import make_name, safe_identifier
-from pyc2py.decompiler.context import DecompilerContext
+from pyc2py.astree import is_none_constant, make_name, safe_identifier
+from pyc2py.decompiler.context import DecompilerContext, UnpackSlot
 from pyc2py.decompiler.opcodes.flow import legacy_slice_mode, make_raise
 from pyc2py.decompiler.opcodes.imports_calls import ImportValue, make_super_attribute
 from pyc2py.decompiler.opcodes.stack_names import is_annotations_name, is_null_sentinel
 from pyc2py.decompiler.opcodes.values import (
-    is_none_constant,
     make_attr_delete,
     make_attr_load,
     make_attr_store,
@@ -30,11 +29,10 @@ from pyc2py.decompiler.recover import (
 from pyc2py.decompiler.runtime import (
     FUNCTION_VALUE_MARK,
     FunctionValue,
-    UnpackSlot,
     coerce_expr,
     is_coroutine_code,
     make_lambda_expr,
-    none_to_empty,
+    slice_bound,
 )
 from pyc2py.decompiler.structures import is_yield_expression
 from pyc2py.stack import FastStack
@@ -45,21 +43,25 @@ class OpcodeAccessRuntimeMixin(DecompilerContext, ABC):
         raw_value = self.pop_or_none()
         if is_null_sentinel(coerce_expr(raw_value)) and self.stack:
             raw_value = self.pop_or_none()
+
         if isinstance(raw_value, ImportValue) and raw_value.name.endswith(f".{name}"):
             self.stack.append(raw_value)
             return
 
         value = coerce_expr(raw_value)
         attribute = make_attr_load(name, value)
+
         if self.version is not None and self.version >= (3, 12) and arg & 1:
             self.push_loaded_method(attribute)
             return
+
         self.stack.append(attribute)
 
     def load_method(self, name: str) -> None:
         raw_value = self.pop_or_none()
         if is_null_sentinel(coerce_expr(raw_value)) and self.stack:
             raw_value = self.pop_or_none()
+
         if isinstance(raw_value, ImportValue) and raw_value.name.endswith(f".{name}"):
             self.push_loaded_method(coerce_expr(raw_value))
             return
@@ -70,7 +72,6 @@ class OpcodeAccessRuntimeMixin(DecompilerContext, ABC):
         self_argument = coerce_expr(self.pop_or_none())
         class_argument = coerce_expr(self.pop_or_none())
         super_function = coerce_expr(self.pop_or_none())
-
         attribute = make_super_attribute(
             super_function=super_function,
             class_argument=class_argument,
@@ -78,13 +79,16 @@ class OpcodeAccessRuntimeMixin(DecompilerContext, ABC):
             attr=name,
             uses_two_arguments=bool(arg & 0x02),
         )
+
         if arg & 1:
             self.push_loaded_method(attribute)
             return
+
         self.stack.append(attribute)
 
     def push_loaded_method(self, attribute: ast.expr) -> None:
         null_value = make_name("NULL", ast.Load())
+
         if self.version is not None and self.version < (3, 13):
             self.stack.append(null_value)
             self.stack.append(attribute)
@@ -123,7 +127,6 @@ class OpcodeAccessRuntimeMixin(DecompilerContext, ABC):
     def before_with(self) -> None:
         manager = self.expression_from_stack_value(self.pop_or_none())
         self.warnings.append("BEFORE_WITH represented as explicit context calls")
-
         self.stack.append(ast.Attribute(value=manager, attr="__exit__", ctx=ast.Load()))
         self.stack.append(
             ast.Call(
@@ -174,7 +177,6 @@ class OpcodeAccessRuntimeMixin(DecompilerContext, ABC):
         self.warnings.append(
             "BEFORE_ASYNC_WITH represented as explicit async context calls"
         )
-
         self.stack.append(
             ast.Attribute(value=manager, attr="__aexit__", ctx=ast.Load())
         )
@@ -195,6 +197,7 @@ class OpcodeAccessRuntimeMixin(DecompilerContext, ABC):
             self.warnings.append("END_SEND on shallow stack")
             self.pop_or_none()
             return
+
         del self.stack[-2]
 
     def cleanup_throw(self) -> None:
@@ -223,6 +226,7 @@ class OpcodeAccessRuntimeMixin(DecompilerContext, ABC):
             self.warnings.append("GET_LEN on empty stack")
             self.stack.append(ast.Constant(value=None))
             return
+
         value = coerce_expr(self.stack[-1])
         self.stack.append(
             ast.Call(func=make_name("len", ast.Load()), args=[value], keywords=[])
@@ -238,6 +242,7 @@ class OpcodeAccessRuntimeMixin(DecompilerContext, ABC):
         if not self.stack:
             self.warnings.append(f"{helper_name} on empty stack")
             return ast.Constant(value=False)
+
         value = coerce_expr(self.stack[-1])
         self.warnings.append(f"{helper_name} represented as helper call")
         return ast.Call(
@@ -253,13 +258,13 @@ class OpcodeAccessRuntimeMixin(DecompilerContext, ABC):
         keys = coerce_expr(self.stack[-1])
         subject = coerce_expr(self.stack[-2])
         self.warnings.append("MATCH_KEYS represented as helper call")
-
         result = ast.Call(
             func=make_name("__pyc2py_match_keys__", ast.Load()),
             args=[subject, keys],
             keywords=[],
         )
         self.stack.append(result)
+
         if self.version is not None and self.version < (3, 11):
             self.stack.append(
                 ast.Compare(
@@ -274,13 +279,13 @@ class OpcodeAccessRuntimeMixin(DecompilerContext, ABC):
         class_value = coerce_expr(self.pop_or_none())
         subject = coerce_expr(self.pop_or_none())
         self.warnings.append("MATCH_CLASS represented as helper call")
-
         result = ast.Call(
             func=make_name("__pyc2py_match_class__", ast.Load()),
             args=[subject, class_value, names, ast.Constant(value=count)],
             keywords=[],
         )
         self.stack.append(result)
+
         if self.version is not None and self.version < (3, 11):
             self.stack.append(
                 ast.Compare(
@@ -292,10 +297,12 @@ class OpcodeAccessRuntimeMixin(DecompilerContext, ABC):
 
     def copy_dict_without_keys(self) -> None:
         keys = coerce_expr(self.pop_or_none())
+
         if not self.stack:
             self.warnings.append("COPY_DICT_WITHOUT_KEYS without subject")
             self.stack.append(ast.Dict(keys=[], values=[]))
             return
+
         subject = coerce_expr(self.stack[-1])
         self.warnings.append("COPY_DICT_WITHOUT_KEYS represented as helper call")
         self.stack.append(
@@ -311,10 +318,9 @@ class OpcodeAccessRuntimeMixin(DecompilerContext, ABC):
         self.stack.append(make_binary_subscript(value, index))
 
     def binary_slice(self) -> None:
-        stop = none_to_empty(coerce_expr(self.pop_or_none()))
-        start = none_to_empty(coerce_expr(self.pop_or_none()))
+        stop = slice_bound(coerce_expr(self.pop_or_none()))
+        start = slice_bound(coerce_expr(self.pop_or_none()))
         value = coerce_expr(self.pop_or_none())
-
         self.stack.append(make_binary_slice(value, start, stop))
 
     def legacy_slice(self, opname: str) -> None:
@@ -323,24 +329,28 @@ class OpcodeAccessRuntimeMixin(DecompilerContext, ABC):
 
     def build_slice(self, count: int) -> None:
         if count == 2:
-            stop = none_to_empty(coerce_expr(self.pop_or_none()))
-            start = none_to_empty(coerce_expr(self.pop_or_none()))
+            stop = slice_bound(coerce_expr(self.pop_or_none()))
+            start = slice_bound(coerce_expr(self.pop_or_none()))
             self.stack.append(
                 make_slice_operand(count, start, stop) or make_slice(None, None)
             )
             return
+
         if count == 3:
-            step = none_to_empty(coerce_expr(self.pop_or_none()))
+            step = slice_bound(coerce_expr(self.pop_or_none()))
             if step is None:
                 step = make_empty_slice_step()
-            stop = none_to_empty(coerce_expr(self.pop_or_none()))
-            start = none_to_empty(coerce_expr(self.pop_or_none()))
+
+            stop = slice_bound(coerce_expr(self.pop_or_none()))
+            start = slice_bound(coerce_expr(self.pop_or_none()))
             slice_value = make_slice_operand(count, start, stop, step)
             if slice_value is None:
                 self.stack.append(ast.Constant(value=None))
                 return
+
             self.stack.append(slice_value)
             return
+
         self.warnings.append(f"unsupported BUILD_SLICE count: {count}")
         self.stack.append(ast.Constant(value=None))
 
@@ -351,12 +361,13 @@ class OpcodeAccessRuntimeMixin(DecompilerContext, ABC):
     def yield_from(self) -> None:
         ignored = self.pop_or_none()
         value = coerce_expr(self.pop_or_none())
-
         if is_none_constant(value):
             value = coerce_expr(ignored)
+
         if is_coroutine_code(self.code):
             self.stack.append(ast.Await(value=value))
             return
+
         self.stack.append(ast.YieldFrom(value=value))
 
     def flush_yield_expressions(self) -> None:
@@ -367,6 +378,7 @@ class OpcodeAccessRuntimeMixin(DecompilerContext, ABC):
             if is_yield_expression(expression):
                 self.statements.append(ast.Expr(value=expression))
                 continue
+
             remaining.append(value)
 
         self.stack = FastStack(remaining)
@@ -378,19 +390,21 @@ class OpcodeAccessRuntimeMixin(DecompilerContext, ABC):
         )
         target_value = coerce_expr(self.pop_or_none())
         raw_value = self.release_copied_store(self.pop_or_none())
-
         if isinstance(raw_value, UnpackSlot):
             target = make_subscript(target_value, index, ast.Store())
             self.store_unpack_target(raw_value, target)
             return
 
         value = self.expression_from_stack_value(raw_value)
+
         if isinstance(target_value, ast.Dict):
             target_value.keys.append(coerce_expr(index))
             target_value.values.append(value)
             return
+
         if self.try_store_annotation(target_value, index, value):
             return
+
         self.append_store_statement(make_subscript_store(target_value, index, value))
 
     def keep_copied_store(self, name: str, value: Any) -> bool:
@@ -398,6 +412,7 @@ class OpcodeAccessRuntimeMixin(DecompilerContext, ABC):
             return False
         if not isinstance(value, ast.expr):
             return False
+
         expression = ast.NamedExpr(target=make_name(name, ast.Store()), value=value)
         setattr(expression, "_pyc2py_copied_store", True)
         self.stack[-1] = expression
@@ -406,18 +421,24 @@ class OpcodeAccessRuntimeMixin(DecompilerContext, ABC):
     def release_copied_store(self, value: Any) -> Any:
         if not getattr(value, "_pyc2py_copied_store", False):
             return value
+
         unwrapped = value.value
         self.statements.append(ast.Assign(targets=[value.target], value=unwrapped))
+
         if self.stack and self.stack[-1] is value:
             self.stack[-1] = unwrapped
+
         return unwrapped
 
     def append_store_statement(self, statement: ast.stmt) -> None:
         if self.pending_simultaneous_store_count > 0:
             setattr(statement, "_pyc2py_store_group", self.simultaneous_store_group)
+
             if self.simultaneous_store_reversed:
                 setattr(statement, "_pyc2py_store_reversed", True)
+
             self.pending_simultaneous_store_count -= 1
+
         self.statements.append(statement)
 
     def expression_from_stack_value(self, value: object) -> ast.expr:
@@ -431,12 +452,13 @@ class OpcodeAccessRuntimeMixin(DecompilerContext, ABC):
             )
             setattr(node, FUNCTION_VALUE_MARK, value)
             return node
+
         return coerce_expr(value)
 
     def try_store_annotation(
         self,
         target_value: ast.expr,
-        index: ast.expr | ast.slice,
+        index: ast.expr,
         value: ast.expr,
     ) -> bool:
         if not is_annotations_name(target_value):
@@ -445,14 +467,25 @@ class OpcodeAccessRuntimeMixin(DecompilerContext, ABC):
             return False
         if stores_annotation_text(self.code):
             value = annotation_from_text(value)
+
         return append_annotation_statement(self.statements, index.value, value)
 
-    def store_slice(self) -> None:
-        stop = none_to_empty(coerce_expr(self.pop_or_none()))
-        start = none_to_empty(coerce_expr(self.pop_or_none()))
-        target_value = coerce_expr(self.pop_or_none())
+    def store_annotation(self, name: str) -> None:
+        # 3.6 only
         value = coerce_expr(self.pop_or_none())
 
+        if stores_annotation_text(self.code):
+            value = annotation_from_text(value)
+        if not append_annotation_statement(self.statements, name, value):
+            self.warnings.append(
+                f"STORE_ANNOTATION of a name that is not simple: {name}"
+            )
+
+    def store_slice(self) -> None:
+        stop = slice_bound(coerce_expr(self.pop_or_none()))
+        start = slice_bound(coerce_expr(self.pop_or_none()))
+        target_value = coerce_expr(self.pop_or_none())
+        value = coerce_expr(self.pop_or_none())
         self.append_store_statement(
             make_subscript_store(target_value, make_slice(start, stop), value)
         )
@@ -460,13 +493,11 @@ class OpcodeAccessRuntimeMixin(DecompilerContext, ABC):
     def store_legacy_slice(self, opname: str) -> None:
         target_value, slice_value = self.pop_legacy_slice_target(opname)
         value = coerce_expr(self.pop_or_none())
-
         self.statements.append(make_subscript_store(target_value, slice_value, value))
 
     def store_attr(self, name: str) -> None:
         target_value = coerce_expr(self.pop_or_none())
         raw_value = self.release_copied_store(self.pop_or_none())
-
         if isinstance(raw_value, UnpackSlot):
             target = ast.Attribute(
                 value=target_value,
@@ -487,7 +518,6 @@ class OpcodeAccessRuntimeMixin(DecompilerContext, ABC):
             raw_index if isinstance(raw_index, ast.Slice) else coerce_expr(raw_index)
         )
         target_value = coerce_expr(self.pop_or_none())
-
         self.statements.append(make_subscript_delete(target_value, index))
 
     def delete_attr(self, name: str) -> None:
@@ -497,7 +527,6 @@ class OpcodeAccessRuntimeMixin(DecompilerContext, ABC):
     def delete_slice(self, opname: str) -> None:
         target_value, slice_value = self.pop_legacy_slice_target(opname)
         target = make_subscript(target_value, slice_value, ast.Del())
-
         self.statements.append(ast.Delete(targets=[target]))
 
     def pop_legacy_slice_target(self, opname: str) -> tuple[ast.expr, ast.Slice]:
@@ -505,25 +534,28 @@ class OpcodeAccessRuntimeMixin(DecompilerContext, ABC):
         if mode == "0":
             target_value = coerce_expr(self.pop_or_none())
             return make_legacy_slice_operand(mode, target_value)
+
         if mode == "1":
-            lower = none_to_empty(self.pop_or_none())
+            lower = slice_bound(self.pop_or_none())
             target_value = coerce_expr(self.pop_or_none())
             return make_legacy_slice_operand(mode, target_value, lower=lower)
+
         if mode == "2":
-            upper = none_to_empty(self.pop_or_none())
+            upper = slice_bound(self.pop_or_none())
             target_value = coerce_expr(self.pop_or_none())
             return make_legacy_slice_operand(mode, target_value, upper=upper)
-        upper = none_to_empty(self.pop_or_none())
-        lower = none_to_empty(self.pop_or_none())
+
+        upper = slice_bound(self.pop_or_none())
+        lower = slice_bound(self.pop_or_none())
         target_value = coerce_expr(self.pop_or_none())
         return make_legacy_slice_operand(mode, target_value, lower=lower, upper=upper)
 
     def raise_varargs(self, count: int) -> None:
         values = [] if count <= 0 else self.pop_many(count)
-        self.statements.append(make_raise(values))
+        self.statements.append(make_raise(values, self.version))
 
     def reraise(self) -> None:
-        statement = make_raise([])
+        statement = make_raise([], self.version)
         setattr(statement, "_pyc2py_synthetic_raise", True)
         self.statements.append(statement)
 
@@ -539,4 +571,5 @@ LOAD_SPECIAL_METHOD_NAMES = (
 def special_method_name(arg: int) -> str | None:
     if arg < 0 or arg >= len(LOAD_SPECIAL_METHOD_NAMES):
         return None
+
     return LOAD_SPECIAL_METHOD_NAMES[arg]

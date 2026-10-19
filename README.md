@@ -1,256 +1,140 @@
 # pyc2py
 
-`pyc2py` is a Python bytecode decompiler.
+*Other pyc decompilers were pretty bad, so I made my own :)*
 
-It takes `.pyc` files and writes recovered `.py` files. You can point it at one
-file, or at a folder of `.pyc` files. The project is built around native
-bytecode to AST recovery, version aware opcode tables, old marshal/code-object
-reading, and validation that tries to catch bad output before you trust it. The
-validation is strict about internal placeholders: generated source with
-unresolved `__pyc2py_*` helper calls should fail instead of looking clean.
+pyc2py takes compiled Python (`.pyc` files) and gives you the source back. The
+part I actually care about: it then checks itself. It recompiles the source it
+just produced and compares every function, byte for byte, against the bytecode
+it started from. So you don't have to take my word that the output is right,
+every file it writes tells you whether it matched, didn't match, or couldn't be
+checked.
 
-This is beta software. Some files will decompile cleanly. Some files will
-produce warnings. Some files will fail. That is expected at this stage, and the
-warnings are meant to be useful enough to fix the decompiler instead of hiding
-the broken part.
+It handles CPython 2.7 and 3.0 through 3.16, and PyPy 2.7 and 3.6 through 3.12.
+Point it at a single file, a whole folder, a zip or wheel, a PyInstaller bundle,
+or a py2exe `.exe`.
 
-`pyc2py` is not claiming to beat `pycdc`, `uncompyle6`, or any other decompiler
-yet. That claim needs a real public corpus and side by side results. For now the
-goal is simpler: make the output compile, make the warnings honest, and keep
-improving the recovery logic.
+## How it stacks up
 
-## install
+I put pyc2py up against the three decompilers people actually reach for, pycdc,
+uncompyle6 and pylingual, on the same pile of real `.pyc` files, in the same
+run. For every file I recompiled whatever the tool handed back and ran it; if it
+behaves exactly like the original, it counts as recovered. That's a fair bar for
+everyone, since nobody has to produce byte-identical bytecode, the recovered
+code just has to actually work.
 
-Use Python 3.10 or newer.
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/benchmark-dark.svg">
+  <img alt="Share of files each decompiler recovers correctly: pyc2py 97.4% vs pycdc 24.2%, pyc2py 96.1% vs uncompyle6 68.4%, pyc2py 97.8% vs pylingual 70.1%." src="assets/benchmark-light.svg" width="100%">
+</picture>
 
-The decompiler has no runtime dependencies.
+Thousands of files spanning Python 2.7 through 3.16, with each tool scored only
+on the versions it supports. pyc2py is reading every one of those versions on a
+single interpreter here, the same spot pycdc and pylingual are in, no matching
+Python needed.
 
-For local development:
+(pyc2py actually holds itself to a stricter bar than "behaves the same": it
+checks that each function recompiles to the exact original bytecode. The chart
+uses the looser behaviour test only so the comparison stays fair to the others.)
+
+## Install
+
+You need Python 3.14 or newer to run it. That's only what pyc2py itself runs on,
+the bytecode it reads can be from any of the versions above. No dependencies.
 
 ```bash
-python -m pip install -e ".[dev]"
+pip install .
 ```
 
-The current dev extras are only formatting/static check tools.
+That gives you the `pyc2py` command. `python -m pyc2py` does the same thing.
 
-## cli
+## Use
 
-Decompile one file:
 ```bash
-python main.py path/to/file.pyc
+pyc2py module.pyc                          # writes module.pyc.py beside it
+pyc2py module.pyc -o recovered             # writes recovered/module.pyc.py
+pyc2py build/lib -o recovered              # every .pyc and .pyo in a folder
+pyc2py build/lib -o recovered --recursive  # and in its subfolders
+pyc2py package.whl -o recovered            # every .pyc in a zip, egg or wheel
+pyc2py dist/app -o recovered               # a PyInstaller bundle (the executable)
+pyc2py app.exe -o recovered                # a py2exe executable
 ```
 
-That writes beside the input file:
-```text
-path/to/file.pyc.py
-```
+pyc2py works out what a file is from what's inside it, not from its name. One
+catch: a bare marshalled code object with no pyc header, which is what tools
+that crack open frozen programs usually spit out, doesn't record which Python
+built it. When that happens, tell it:
 
-Decompile one file into a folder:
 ```bash
-python main.py path/to/file.pyc --out-dir recovered
+pyc2py code_object --python-version 3.12
 ```
 
-Decompile a folder of `.pyc` files:
-```bash
-python main.py path/to/pyc_folder --out-dir recovered
-```
+`--python-version` is also how you override a header that's lying, say a
+pre-release build. The output notes that you forced the version and what the
+header actually claimed.
 
-Scan nested folders too:
-```bash
-python main.py path/to/pyc_folder --out-dir recovered --recursive
-```
+A few more flags:
 
-The positional input can also be written with `--input`:
-```bash
-python main.py --input path/to/pyc_folder --output-dir recovered
-```
+- `--compact`: stop putting each statement back on its original line. By default
+  I keep the original line numbers, so a traceback from the recovered code lands
+  on the same lines it would in the real source.
+- `--disassemble`: also drop a `<output>.dis` next to the output, every code
+  object with its offsets, lines, opcodes, arguments, jump targets and exception
+  table.
+- `--verify-with PYTHON`: point this at an interpreter matching the file's own
+  version. pyc2py can only diff bytecode against the Python it's running on, so
+  with this it compiles the recovered source using the interpreter you give it
+  and checks every function there instead. Pass it once per version you need.
+  PyPy works too.
 
-Folder mode requires `--out-dir`. `--recursive` only works with folder input.
+## What the output tells you
 
-## console output
+Every function and class body gets its own verdict, and the file as a whole
+takes the worst one:
 
-The CLI clears the console between phases so a run is easier to follow:
+- `passed`: everything compiled straight back to the original bytecode.
+- `failed`: something's off, missing, unreadable, or the input is damaged.
+  Anything I couldn't recover becomes `raise NotImplementedError("pyc2py could
+  not ...")`. I never guess and hope.
+- `unverified`: the bytecode came from a different Python than the one running
+  pyc2py, so all I could confirm is that every function is there with the same
+  arguments. `--verify-with` turns these into a real `passed` or `failed`.
 
-```text
-phase 0 - job setup
-phase 1 - input checks
-phase 2 - loading bytecode
-phase 3 - recovering source
-phase 4 - writing output
-phase 5 - validating result
-phase 6 - final report
-```
+Each file ends with a `# pyc2py:` comment block: the bytecode's version and
+magic number, the original filename, the source size and timestamp (or hash),
+and, for anything that didn't pass, which functions failed and why. It sits at
+the bottom on purpose, so it doesn't push the code's line numbers around.
 
-At the end, the final report prints every warning and every error. It does not
-shorten the list. If a file fails, paste the final diagnostics when reporting
-the issue.
+If a module unpacks and runs hidden code, the
+`exec(zlib.decompress(base64.b64decode(...)))` trick and its relatives, each
+layer gets written out next to it as `<output>.layer1.py` and so on. pyc2py
+peels these apart without running anything. A marshalled layer gets decompiled
+and checked like any other file.
 
-## python api
+Exit codes: `0` if everything passed, `1` if anything failed, `2` if nothing
+failed but some came out unverified, and `3` if nothing got decompiled at all
+because the command line or the input folder was wrong.
 
-The small API in `pyc2py/api.py` wraps the same pipeline used by the CLI:
+## Python API
 
 ```python
-from pyc2py.api import decompile, decompile_folder, decompile_to_folder
+from pyc2py import decompile, decompile_folder, decompile_to_folder
 
-result = decompile("example.pyc")
-folder_results = decompile_folder("pyc_files", "recovered", recursive=True)
+result = decompile("module.pyc")
+print(result.status, result.output.path)
+for unit in result.report.units:
+    print(unit.name, unit.status, unit.reason)
 ```
 
-Each result contains:
+## What it can't do (yet)
 
-- `output.path`
-- `output.source`
-- `output.strategy`
-- `output.warnings`
-- `report.passed`
-- `report.warnings`
-- `report.errors`
-- `report.checks`
+- Python 2.7 source won't compile under Python 3.14, so 2.7 files stay
+  `unverified` unless you hand it a 2.7 interpreter with `--verify-with`.
+- Some bytecode shapes aren't handled yet. When a function does come out wrong,
+  its verdict says so.
+- It doesn't decrypt anything. Encrypted PyInstaller archives (an option
+  PyInstaller dropped in 6.0 anyway) fail one member at a time with that as the
+  reason, and bytecode with remapped opcodes is out of reach.
 
-## how it works
+## License
 
-The main flow is:
-
-```text
-load .pyc
-decode code object
-decode bytecode instructions
-recover an AST
-unparse and format source
-write .py file
-validate generated output
-print full diagnostics
-```
-
-The important modules are:
-
-```text
-main.py                         cli, phases, final diagnostics
-pyc2py/api.py                   public python wrapper
-pyc2py/pipeline.py              file-to-source pipeline
-pyc2py/types.py                 shared result/report data
-
-pyc2py/pyc/loader.py            native and legacy pyc loading
-pyc2py/pyc/header.py            magic/header metadata
-pyc2py/pyc/magic.py             magic number to version lookup
-pyc2py/pyc/marshal_reader.py    legacy marshal object reader
-pyc2py/pyc/marshal_code_reader.py old code-object shapes
-
-pyc2py/bytecode/opcode_table.py versioned opcode tables
-pyc2py/bytecode/decoder.py      native and legacy instruction decoding
-pyc2py/bytecode/operand.py      operand resolution
-pyc2py/bytecode/scanner.py      raw bytecode scanning
-pyc2py/bytecode/stack_effect.py stack-effect tables
-pyc2py/bytecode/versions/       per-version opcode maps
-
-pyc2py/decompiler/engine.py     native bytecode-to-AST engine
-pyc2py/decompiler/control.py    structured control-flow recovery
-pyc2py/decompiler/control_loop.py loop recovery
-pyc2py/decompiler/exception_structures.py exception recovery
-pyc2py/decompiler/opcodes/      opcode handlers
-pyc2py/decompiler/runtime.py    runtime values used during recovery
-
-pyc2py/source.py                source formatting and source validation
-pyc2py/reporting.py             bytecode/cfg/stack/source checks
-pyc2py/cfg.py                   control-flow graph helpers
-pyc2py/stack.py                 stack simulation and stack validation
-pyc2py/astree.py                AST cleanup and AST shape checks
-```
-
-## supported bytecode
-
-The project has opcode tables for Python 1.0 through Python 3.15.
-
-That does not mean every version has the same reliability. Newer versions can
-use the host Python `dis` and `marshal` support when the `.pyc` matches the
-running interpreter. Older versions go through the custom marshal reader and
-versioned opcode tables.
-
-For Python 3 output, `pyc2py` validates by parsing and compiling the generated
-source. For Python 1.x and 2.x output, the host Python cannot compile old syntax,
-so validation is limited to formatting and bytecode/code-object checks.
-
-## validation
-
-A passing run means the generated source passed the checks that apply to that
-file. It does not mean the output is byte-for-byte or behavior-for-behavior equal
-to the original source.
-
-Current checks include:
-
-- generated source parse/compile checks for Python 3 source
-- unresolved internal `__pyc2py_*` helper detection
-- source formatting checks
-- recovered AST shape checks
-- bytecode decode checks
-- operand and jump target checks
-- line table checks
-- CFG checks
-- stack-effect checks
-- exception table checks where available
-
-Warnings matter. If the final report has warnings, inspect the output before
-using it.
-
-Recent reliability work tightened two small but important cases:
-
-- match pattern capture names now count as real local assignments, so the
-  decompiler should not inject fake `name = None` initializers for captures like
-  `case [x]` or `case {"a": a, **rest}`
-- unresolved internal helper calls now fail validation, because code that calls
-  a missing `__pyc2py_*` helper can compile but still crash at runtime
-
-## known limits
-
-The weak spots are the normal hard parts of Python decompilation:
-
-- exception cleanup
-- unusual control flow
-- nested comprehensions and generators
-- async bytecode
-- pattern matching
-- superinstructions and changed opcodes in newer Python versions
-- very old Python syntax that modern Python cannot compile
-- generated source that compiles but is not semantically identical
-- source that still needs an internal helper means the recovery logic is not done
-
-There is no deobfuscation or automatic decryption layer in this release. This
-release is about decompiling `.pyc` files, not unpacking protected programs.
-
-## contributing
-
-Keep changes focused on decompilation reliability.
-
-Good fixes usually improve one of these areas:
-
-- opcode table accuracy
-- marshal/code-object parsing
-- operand resolution
-- structured control-flow recovery
-- exception recovery
-- AST cleanup
-- validation warnings that point at real decompiler bugs
-
-Avoid adding generated outputs, caches, or one-off sample files to commits.
-
-Ignored/generated files include:
-
-```text
-__pycache__/
-.ruff_cache/
-.mypy_cache/
-*.pyc
-*.pyc.py
-tmp_*/
-build/
-dist/
-```
-
-Before pushing, run:
-
-```bash
-python -B -c "import ast, pathlib; paths=[pathlib.Path('main.py'), *pathlib.Path('pyc2py').rglob('*.py')]; [ast.parse(path.read_text(encoding='utf-8'), filename=str(path)) for path in paths]; import pyc2py.pipeline; import pyc2py.decompiler; import pyc2py.bytecode; import pyc2py.pyc; print('ok')"
-```
-
-If you run manual `.pyc` smoke tests, remove the generated files before
-committing.
+MIT, see `LICENSE`.

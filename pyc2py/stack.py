@@ -1,19 +1,17 @@
 from collections.abc import Iterable, Iterator, MutableSequence
 from dataclasses import dataclass, field
-from typing import Generic, TypeVar, cast, overload
+from typing import cast, overload
 
 from pyc2py.bytecode.instruction import Instruction
 from pyc2py.bytecode.stack_effect import instruction_stack_effect
 from pyc2py.cfg import BasicBlock, CFGEdge, ControlFlowGraph, build_cfg
-
-T = TypeVar("T")
 
 
 class StackUnderflowError(IndexError):
     pass
 
 
-class FastStack(Generic[T], MutableSequence[T]):
+class FastStack[T](MutableSequence[T]):
     def __init__(self, values: Iterable[T] = (), max_depth: int | None = None) -> None:
         if max_depth is not None and max_depth < 1:
             raise ValueError("max_depth must be positive")
@@ -51,6 +49,7 @@ class FastStack(Generic[T], MutableSequence[T]):
             self.values[index] = list(cast("Iterable[T]", value))
         else:
             self.values[index] = cast("T", value)
+
         self.check_depth()
 
     def __delitem__(self, index: int | slice) -> None:
@@ -67,12 +66,13 @@ class FastStack(Generic[T], MutableSequence[T]):
     def pop(self, index: int = -1) -> T:
         if not self.values:
             raise StackUnderflowError("cannot pop from an empty stack")
+
         return self.values.pop(index)
 
     def clear(self) -> None:
         self.values.clear()
 
-    def copy(self) -> "FastStack[T]":
+    def copy(self) -> FastStack[T]:
         return FastStack(self.values, max_depth=self.max_depth)
 
     def to_list(self) -> list[T]:
@@ -127,6 +127,7 @@ class FastStack(Generic[T], MutableSequence[T]):
         target_index = len(self.values) - depth - 1
         if target_index < 0:
             raise StackUnderflowError("cannot swap beyond the stack depth")
+
         self.values[-1], self.values[target_index] = (
             self.values[target_index],
             self.values[-1],
@@ -155,7 +156,7 @@ class StackValidation:
     cfg_depth_conflicts: int = 0
     cfg_exception_edges_skipped: int = 0
     declared_stacksize: int | None = None
-    warnings: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list[str])
 
     @property
     def checks(self) -> tuple[str, ...]:
@@ -166,6 +167,7 @@ class StackValidation:
             f"linear stack final depth: {self.final_depth}",
             f"linear stack underflow risks: {self.underflow_risks}",
         ]
+
         if self.declared_stacksize is not None:
             checks.append(f"declared stack size: {self.declared_stacksize}")
         if self.cfg_state_count is not None and self.cfg_max_depth is not None:
@@ -173,7 +175,8 @@ class StackValidation:
                 [
                     f"CFG stack states visited: {self.cfg_state_count}",
                     f"CFG stack max depth: {self.cfg_max_depth}",
-                    f"CFG stack terminal depths: {format_depths(self.cfg_terminal_depths)}",
+                    "CFG stack terminal depths: "
+                    + format_depths(self.cfg_terminal_depths),
                 ]
             )
         if self.cfg_underflow_risks is not None:
@@ -186,6 +189,7 @@ class StackValidation:
             checks.append(
                 f"CFG stack exception edges skipped: {self.cfg_exception_edges_skipped}"
             )
+
         return tuple(checks)
 
 
@@ -213,6 +217,7 @@ def validate_linear_stack_effects(
 
     cfg_validation = validate_cfg_stack_depths(instructions, version)
     declared_stacksize = None
+
     if expected_stacksize is not None and expected_stacksize >= 0:
         declared_stacksize = expected_stacksize
 
@@ -249,7 +254,7 @@ class CFGStackValidation:
     underflow_risks: int
     depth_conflicts: int
     exception_edges_skipped: int
-    warnings: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list[str])
 
 
 def validate_cfg_stack_depths(
@@ -258,6 +263,7 @@ def validate_cfg_stack_depths(
 ) -> CFGStackValidation:
     graph = build_cfg(instructions)
     blocks = graph.block_by_offset()
+
     if graph.entry_offset is None:
         return make_empty_cfg_stack_validation()
 
@@ -270,14 +276,15 @@ def validate_cfg_stack_depths(
     for _index in range(MAX_CFG_STACK_STATES):
         if not work:
             break
+
         block_offset, entry_depth = work.pop()
         previous_depth = entry_depth_by_block.get(block_offset)
         if previous_depth is not None:
             state.depth_conflicts += int(previous_depth != entry_depth)
             continue
+
         entry_depth_by_block[block_offset] = entry_depth
         state.state_count += 1
-
         block = blocks.get(block_offset)
         if block is None:
             continue
@@ -292,6 +299,7 @@ def validate_cfg_stack_depths(
         state.exception_edges_skipped += len(graph.successors(block_offset)) - len(
             successors
         )
+
         if not successors:
             terminal_depths.add(exit_depth)
             continue
@@ -338,6 +346,7 @@ def apply_block_stack_effects(
     version: tuple[int, ...] | None = None,
 ) -> int:
     depth = entry_depth
+
     for instruction in instructions:
         step = apply_instruction_effect(depth, instruction, version)
         if not step.known:
@@ -346,6 +355,7 @@ def apply_block_stack_effects(
         state.underflow_risks += int(step.underflow)
         depth = step.depth
         state.max_depth = max(state.max_depth, depth)
+
     return depth
 
 
@@ -378,6 +388,7 @@ def apply_instruction_effect(
         return StackStep(depth=depth, known=False, underflow=False)
     if effect.pops > depth:
         return StackStep(depth=effect.pushes, known=True, underflow=True)
+
     return StackStep(
         depth=depth - effect.pops + effect.pushes, known=True, underflow=False
     )
@@ -388,5 +399,6 @@ def format_depths(depths: tuple[int, ...]) -> str:
         return "none"
     if len(depths) <= 8:
         return ", ".join(str(depth) for depth in depths)
+
     prefix = ", ".join(str(depth) for depth in depths[:8])
     return f"{prefix}, ..."

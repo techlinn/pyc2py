@@ -1,5 +1,6 @@
-from typing import Any
+from typing import Any, cast
 
+from pyc2py.bytecode.formats import pypy_format
 from pyc2py.pyc.code import PycCode
 from pyc2py.pyc.marshal_code_reader import MarshalCodeReaderMixin
 from pyc2py.pyc.objects import (
@@ -25,7 +26,6 @@ from pyc2py.pyc.primitives import (
 from pyc2py.pyc.reference import TYPE_REF, ReferenceTable, split_type_code
 
 MAX_MARSHAL_DEPTH = 2_000
-TYPE_CODE_LEGACY = ord("C")
 MARSHAL_SCALARS = {
     ord("0"): NULL_OBJECT,
     ord("N"): None,
@@ -50,15 +50,20 @@ RECURSIVE_PAYLOAD_METHODS = {
     ord(":"): "read_slice",
     ord("{"): "read_mapping",
     ord("}"): "read_frozen_mapping",
-    TYPE_CODE_LEGACY: "read_code_ancient_compact",
     ord("c"): "read_code",
 }
 
 
 class MarshalReader(MarshalCodeReaderMixin):
-    def __init__(self, data: bytes, version: tuple[int, ...]) -> None:
+    def __init__(
+        self, data: bytes, version: tuple[int, ...], opcodes: str = ""
+    ) -> None:
         self.data = data
         self.version = version
+        self.opcodes = opcodes
+        self.code_extras: tuple[str, ...] = (
+            pypy_format(opcodes).code_extras if opcodes else ()
+        )
         self.refs = ReferenceTable()
         self.interned: list[str | bytes] = []
 
@@ -108,6 +113,7 @@ class MarshalReader(MarshalCodeReaderMixin):
             return self.read_number(type_code, offset, has_ref)
         if type_code in STRING_TYPE_CODES:
             return self.read_string(type_code, offset, has_ref)
+
         return None
 
     def read_recursive_payload(
@@ -123,6 +129,7 @@ class MarshalReader(MarshalCodeReaderMixin):
         method_name = RECURSIVE_PAYLOAD_METHODS.get(type_code)
         if method_name is None:
             return None
+
         return getattr(self, method_name)(offset, depth, has_ref)
 
     def read_scalar_payload(
@@ -137,14 +144,19 @@ class MarshalReader(MarshalCodeReaderMixin):
         if type_code == ord("i"):
             value, offset = read_int32(self.data, offset)
             return self.refs.remember(value, has_ref), offset
+
         if type_code == ord("I"):
             value, offset = read_int64(self.data, offset)
             return self.refs.remember(value, has_ref), offset
+
         if type_code == ord("l"):
             value, offset = read_long(self.data, offset)
+
             if self.version < (3, 0):
                 value = LegacyLong(value)
+
             return self.refs.remember(value, has_ref), offset
+
         return None
 
     def read_number(
@@ -213,8 +225,20 @@ class MarshalReader(MarshalCodeReaderMixin):
         return self.refs.set_reserved(reserved, value), offset
 
 
-def load_marshal_code(data: bytes, version: tuple[int, ...]) -> PycCode:
-    reader = MarshalReader(data, version)
+def listed_item(value: Any, item: int) -> Any:
+    # one entry of a marshalled list, such as a py2exe script's code objects
+    if not isinstance(value, list):
+        return None
+
+    values = cast("list[Any]", value)
+    return values[item] if 0 <= item < len(values) else None
+
+
+def load_marshal_code(
+    data: bytes, version: tuple[int, ...], item: int | None = None, opcodes: str = ""
+) -> PycCode:
+    reader = MarshalReader(data, version, opcodes)
+
     try:
         value, offset = reader.read_object(0)
     except RecursionError as error:
@@ -222,6 +246,8 @@ def load_marshal_code(data: bytes, version: tuple[int, ...]) -> PycCode:
     except TypeError as error:
         raise ValueError(f"marshal payload is malformed: {error}") from error
 
+    if item is not None:
+        value = listed_item(value, item)
     if not isinstance(value, PycCode):
         raise ValueError("marshal payload did not contain a code object")
     if offset != len(data):

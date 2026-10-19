@@ -2,6 +2,9 @@ import ast
 from dataclasses import dataclass
 
 from pyc2py.bytecode.instruction import Instruction
+from pyc2py.bytecode.opcode_table import (
+    BACKWARD_JUMPS,
+)
 from pyc2py.decompiler.structures import find_loop_back_jump
 
 
@@ -193,18 +196,20 @@ def find_async_for_end_behind_handlers(
             continue
         if instructions[index + 1].argval != end_send_offset:
             continue
+
         end = index + 2
         while end + 2 < end_index and is_throw_path(instructions, end):
             end += 2
+
         if instructions[end].opname == "END_ASYNC_FOR":
             return end + 1
+
     return None
 
 
 def is_throw_path(instructions: list[Instruction], index: int) -> bool:
     return instructions[index].opname == "CLEANUP_THROW" and (
-        instructions[index + 1].opname
-        in {"JUMP_BACKWARD", "JUMP_BACKWARD_NO_INTERRUPT"}
+        instructions[index + 1].opname in BACKWARD_JUMPS
     )
 
 
@@ -215,15 +220,19 @@ def has_out_of_line_async_for_end(
 ) -> bool:
     if after_index >= end_index:
         return False
+
     after_offset = instructions[after_index].offset
+
     for index in range(after_index, end_index - 1):
         if instructions[index].opname != "END_ASYNC_FOR":
             continue
+
         jump = instructions[index + 1]
-        if jump.opname not in {"JUMP_BACKWARD", "JUMP_BACKWARD_NO_INTERRUPT"}:
+        if jump.opname not in BACKWARD_JUMPS:
             continue
         if jump.argval == after_offset:
             return True
+
     return False
 
 
@@ -257,7 +266,6 @@ def find_async_for_header(
         return None
 
     target_start_index, target_end_index = target_span
-
     return AsyncForHeader(
         setup_except_index=setup_except_index,
         get_anext_index=get_anext_index,
@@ -418,6 +426,7 @@ def is_async_for_next_sequence(
         return False
     if instructions[get_anext_index + 1].opname != "LOAD_CONST":
         return False
+
     return instructions[get_anext_index + 2].opname in {"YIELD_FROM", "SEND"}
 
 
@@ -436,6 +445,7 @@ def find_async_for_body_span(
         "JUMP",
     }:
         return None
+
     if body_jump.argval in loop_offsets:
         body_start_index = header.target_end_index + 1
         return body_start_index, body_start_index
@@ -443,8 +453,8 @@ def find_async_for_body_span(
     resolved_body_start = offset_to_index.get(int(body_jump.argval))
     if resolved_body_start is None or resolved_body_start <= header.target_end_index:
         return None
-    body_start_index = resolved_body_start
 
+    body_start_index = resolved_body_start
     body_end_index = find_loop_back_jump(
         instructions,
         loop_offsets,
@@ -467,6 +477,7 @@ def skip_async_for_prefix(
         cursor < end_index and instructions[cursor].opname in ASYNC_FOR_HANDLER_PREFIX
     ):
         cursor += 1
+
     return cursor
 
 
@@ -478,21 +489,25 @@ def find_async_for_target_end(
     cursor = skip_async_for_prefix(instructions, start_index, end_index)
     if cursor >= end_index:
         return None
+
     instruction = instructions[cursor]
     if instruction.opname.startswith("STORE_"):
         return cursor + 1
-    if instruction.opname not in {"UNPACK_SEQUENCE", "UNPACK_TUPLE"}:
+    if instruction.opname != "UNPACK_SEQUENCE":
         return None
 
     count = int(instruction.arg or 0)
     target_end = cursor + 1
+
     for _index in range(count):
         target_end = skip_async_for_prefix(instructions, target_end, end_index)
         if target_end >= end_index:
             return None
         if not instructions[target_end].opname.startswith("STORE_"):
             return None
+
         target_end += 1
+
     return target_end
 
 
@@ -508,7 +523,9 @@ def find_async_for_cleanup_jump(
         if instruction.opname not in {"POP_JUMP_IF_TRUE", "POP_JUMP_FORWARD_IF_TRUE"}:
             cursor += 1
             continue
+
         return offset_to_index.get(int(instruction.argval))
+
     return None
 
 
@@ -521,7 +538,9 @@ def skip_async_for_cleanup(
     while cursor < end_index and instructions[cursor].opname in ASYNC_FOR_CLEANUP_OPS:
         if instructions[cursor].opname == "POP_BLOCK":
             return cursor + 1
+
         cursor += 1
+
     return cursor
 
 
@@ -531,16 +550,20 @@ def skip_modern_async_for_cleanup(
     end_index: int,
 ) -> int | None:
     cursor = cleanup_index
+
     for _index in range(8):
         cursor = skip_async_for_prefix(instructions, cursor, end_index)
         if cursor >= end_index:
             return None
+
         instruction = instructions[cursor]
         if instruction.opname == "END_ASYNC_FOR":
             return cursor + 1
         if instruction.opname not in ASYNC_FOR_CLEANUP_OPS:
             return None
+
         cursor += 1
+
     return None
 
 
@@ -551,6 +574,7 @@ def has_empty_async_for_continue_marker(
     loop_offsets: set[int],
 ) -> bool:
     loop_jumps = 0
+
     for index in range(handler_start_index, cleanup_index):
         instruction = instructions[index]
         if instruction.opname not in {
@@ -575,6 +599,7 @@ def make_async_for_statement(
 ) -> ast.AsyncFor:
     if not body and empty_body_is_continue:
         body = [ast.Continue()]
+
     return ast.AsyncFor(
         target=target,
         iter=iterable,
