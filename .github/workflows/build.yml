@@ -1,0 +1,40 @@
+name: build
+
+on: [push, workflow_dispatch]
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        os: [ubuntu-22.04, windows-2022]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - run: pip install nuitka zstandard
+      - shell: bash
+        run: |
+          n=$((GITHUB_RUN_NUMBER - 3))
+          echo "VERSION=$((1 + n / 100)).$((n / 10 % 10)).$((n % 10))" >> "$GITHUB_ENV"
+      - run: >
+          python -m nuitka pyc2py
+          --mode=onefile
+          --output-dir=dist
+          --output-filename=pyc2py
+          --include-package=pyc2py
+          --include-module=_ast_unparse
+          --onefile-cache-mode=cached
+          "--onefile-tempdir-spec={CACHE_DIR}/pyc2py/{VERSION}"
+          --product-version=${{ env.VERSION }}
+          --lto=yes
+          --deployment
+          --assume-yes-for-downloads
+          --remove-output
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pyc2py-${{ runner.os }}
+          path: |
+            dist/pyc2py
+            dist/pyc2py.exe
